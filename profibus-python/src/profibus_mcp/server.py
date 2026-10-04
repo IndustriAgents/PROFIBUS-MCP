@@ -20,6 +20,9 @@ SERVER_NAME = "PROFIBUS MCP Server"
 class EnvelopeFastMCP(FastMCP):
     """FastMCP that answers invalid tool arguments with a ``success: false`` envelope.
 
+    Uses FastMCP internals (``_tool_manager``, ``fn_metadata.convert_result``),
+    which is why pyproject.toml pins ``mcp<2``.
+
     FastMCP validates arguments against the tool signature before the tool
     runs and turns a failure into a bare protocol error. Catching it here keeps
     the suite's ``{success, data, error, meta}`` contract for bad input too.

@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "IndustriAgents" }]
 dependencies = [
     "anyio>=4.5.0",
-    "mcp[cli]>=1.17.0",
+    "mcp[cli]>=1.17.0,<2",
     "pydantic>=2.11.0",
     "python-dotenv>=1.1.0",
     "pyserial>=3.5",
