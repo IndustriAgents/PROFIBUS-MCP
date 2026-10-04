@@ -41,8 +41,12 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NOCTTY = getattr(os, "O_NOCTTY", 0)
 #: The file itself: no symlink, no blocking on a FIFO, never a controlling tty.
 _OPEN_FLAGS = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | _NOCTTY | getattr(os, "O_BINARY", 0)
+#: How directories on the way are opened: for traversal only where the OS allows
+#: it (O_PATH on Linux, O_SEARCH on macOS/BSD), so a search-only (--x) directory
+#: such as a 0711 home directory can be passed; otherwise read access is needed.
+_DIR_ACCESS = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0) or os.O_RDONLY
 #: Each directory on the way: no symlink, and it must be a directory.
-_DIR_FLAGS = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_DIRECTORY", 0) | _NOCTTY
+_DIR_FLAGS = _DIR_ACCESS | _NOFOLLOW | getattr(os, "O_DIRECTORY", 0) | _NOCTTY
 #: Opening relative to a directory descriptor needs dir_fd support (not on Windows).
 _CAN_WALK = os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and _NOFOLLOW != 0
 #: errno values for "a symlink (or non-directory) where none is allowed".
@@ -341,17 +345,26 @@ def _open_without_symlinks(path: Path) -> int:
 
     Each directory is opened relative to the previous one with O_NOFOLLOW and
     O_DIRECTORY, then the file with O_NOFOLLOW. A component replaced by a
-    symlink fails with ELOOP/ENOTDIR instead of leading somewhere else. Where
-    dir_fd is unsupported (Windows), the whole path is opened at once and the
-    device/inode re-check in the caller is the guard.
+    symlink fails with ELOOP/ENOTDIR instead of leading somewhere else.
+
+    Where dir_fd is unsupported (Windows), or a directory on the way cannot be
+    opened for traversal (EACCES: search-only and no O_PATH/O_SEARCH), the
+    whole path is opened at once and the device/inode re-check in the caller
+    is the guard.
     """
     if not _CAN_WALK:
         return os.open(path, _OPEN_FLAGS)
     parts = path.parts
-    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)  # the root itself
+    try:
+        fd = os.open(parts[0], _DIR_ACCESS | os.O_DIRECTORY)  # the root itself
+    except PermissionError:
+        return os.open(path, _OPEN_FLAGS)
     try:
         for part in parts[1:-1]:
-            next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            try:
+                next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except PermissionError:
+                return os.open(path, _OPEN_FLAGS)
             os.close(fd)
             fd = next_fd
         return os.open(parts[-1], _OPEN_FLAGS, dir_fd=fd)

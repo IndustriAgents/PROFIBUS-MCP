@@ -502,3 +502,74 @@ def test_without_dir_fd_the_identity_recheck_refuses_a_swapped_parent(tmp_path, 
     swapping_open.install(swap, restore)
     with pytest.raises(GSDParserError, match="changed while it was being opened"):
         GSDParser(base).load("sub/dev.gsd")
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+@pytest.mark.parametrize("where", ["inside", "above"])
+def test_search_only_directories_on_the_way_are_traversed(tmp_path, where):
+    # Like a 0711 home directory: --x lets you pass through but not list.
+    if where == "inside":
+        base = tmp_path / "gsd"
+        locked = base / "locked"
+        locked.mkdir(parents=True)
+        (locked / "dev.gsd").write_text(MINIMAL, encoding="ascii")
+        request = "locked/dev.gsd"
+    else:
+        locked = tmp_path / "home"
+        base = locked / "gsd"
+        base.mkdir(parents=True)
+        (base / "dev.gsd").write_text(MINIMAL, encoding="ascii")
+        request = "dev.gsd"
+    locked.chmod(0o311)
+    try:
+        assert GSDParser(base).load(request)["metadata"]["ident_number"] == "0x00AB"
+    finally:
+        locked.chmod(0o755)
+
+
+def _locked_tree(tmp_path):
+    base = tmp_path / "gsd"
+    locked = base / "locked"
+    locked.mkdir(parents=True)
+    (locked / "dev.gsd").write_text(MINIMAL, encoding="ascii")
+    locked.chmod(0o311)
+    return base, locked
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_without_traversal_only_opens_the_fallback_still_loads(tmp_path, monkeypatch):
+    # A platform with neither O_PATH nor O_SEARCH needs read access to walk a
+    # directory; EACCES then falls back to the whole-path open plus re-check.
+    from profibus_mcp import gsd_parser
+
+    monkeypatch.setattr(gsd_parser, "_DIR_ACCESS", os.O_RDONLY)
+    monkeypatch.setattr(gsd_parser, "_DIR_FLAGS", os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_NOCTTY)
+    base, locked = _locked_tree(tmp_path)
+    try:
+        assert GSDParser(base).load("locked/dev.gsd")["metadata"]["ident_number"] == "0x00AB"
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0 or not (hasattr(os, "O_PATH") or hasattr(os, "O_SEARCH")),
+    reason="needs O_PATH or O_SEARCH, POSIX permissions and a non-root user",
+)
+def test_search_only_directories_are_walked_not_bypassed(tmp_path, monkeypatch):
+    # Where the OS can open a directory for traversal only, the symlink-proof
+    # walk is used even through a --x directory; the whole-path fallback is not.
+    base, locked = _locked_tree(tmp_path)
+    real_open = os.open
+    whole_path_opens = []
+
+    def recording(path, flags, *args, **kwargs):
+        if "dir_fd" not in kwargs and str(path) != os.sep:
+            whole_path_opens.append(path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording)
+    try:
+        assert GSDParser(base).load("locked/dev.gsd")["metadata"]["ident_number"] == "0x00AB"
+    finally:
+        locked.chmod(0o755)
+    assert whole_path_opens == []
