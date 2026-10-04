@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from typing import Any
@@ -269,7 +270,9 @@ async def test_broken_or_missing_slave_map_is_an_error_not_an_empty_list(tmp_pat
 
 
 async def test_load_gsd_file_tool(tmp_path):
-    config = ProfibusConfig(gsd_base_path=DATA_DIR)
+    shutil.copy(DATA_DIR / "IA_1234.gsd", tmp_path / "IA_1234.gsd")
+    (tmp_path / "device.xml").write_text("<ISO15745Profile/>", encoding="utf-8")
+    config = ProfibusConfig(gsd_base_path=tmp_path)
     async with connect(config) as session:
         first = await call(session, "load_gsd_file", {"filepath": "IA_1234.gsd"})
         assert first["success"] and first["data"]["metadata"]["ident_number"] == "0x1234"
@@ -280,10 +283,14 @@ async def test_load_gsd_file_tool(tmp_path):
         missing = await call(session, "load_gsd_file", {"filepath": "nope.gsd"})
         assert missing["success"] is False and "not found" in missing["error"]
 
-        xml = tmp_path / "device.xml"
-        xml.write_text("<ISO15745Profile/>", encoding="utf-8")
-        rejected = await call(session, "load_gsd_file", {"filepath": str(xml)})
+        rejected = await call(session, "load_gsd_file", {"filepath": "device.xml"})
         assert rejected["success"] is False and "GSDML" in rejected["error"]
+
+        # With PROFIBUS_GSD_PATH set, nothing outside it is opened.
+        outside = await call(session, "load_gsd_file", {"filepath": str(DATA_DIR / "IA_1234.gsd")})
+        assert outside["success"] is False and "outside PROFIBUS_GSD_PATH" in outside["error"]
+        outside = await call(session, "load_gsd_file", {"filepath": "../../etc/passwd"})
+        assert outside["success"] is False and "outside PROFIBUS_GSD_PATH" in outside["error"]
 
 
 async def test_ping_reports_backend_and_version():

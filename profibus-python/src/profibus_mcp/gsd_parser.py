@@ -10,7 +10,16 @@ GSDML files (XML) describe PROFINET IO devices and are rejected with a clear
 error; this server is PROFIBUS DP only.
 
 I/O lengths come from each module's DP configuration identifiers (the bytes
-sent in Chk_Cfg), decoded in :func:`decode_config_identifiers`.
+sent in Chk_Cfg), decoded in :func:`decode_config_identifiers`. A module whose
+identifiers cannot be decoded is reported with an ``error`` and a warning; it
+does not make the whole file unreadable.
+
+Indexed keywords such as ``Ext_User_Prm_Data_Ref(3)`` may legitimately repeat
+(bit-field parameters share a byte), so they are kept as lists in
+``indexed_keywords``.
+
+When ``PROFIBUS_GSD_PATH`` is set, :class:`GSDParser` only opens files inside
+it (after resolving symlinks).
 """
 
 from __future__ import annotations
@@ -107,12 +116,15 @@ def decode_config_identifiers(cfg: Sequence[int]) -> tuple[int, int]:
             if direction & 0x02:
                 outputs += size
             continue
+        vendor_bytes = head & 0x0F
+        if vendor_bytes == 15:
+            raise GSDParserError(f"special identifier 0x{head:02X}: the manufacturer byte count must be 0-14")
         kind = (head >> 6) & 0x03
         if kind in (2, 3):
             outputs += length_byte()
         if kind in (1, 3):
             inputs += length_byte()
-        for _ in range(head & 0x0F):
+        for _ in range(vendor_bytes):
             take()
     return inputs, outputs
 
@@ -128,6 +140,7 @@ def parse_gsd_text(text: str, source: str = "<string>") -> dict[str, Any]:
         raise GSDParserError(f"{source} is not a text file")
 
     keywords: dict[str, tuple[str, Any]] = {}  # lower-case key -> (spelling, value)
+    indexed: dict[str, tuple[str, list[dict[str, Any]]]] = {}  # lower-case name -> (spelling, entries)
     modules: list[dict[str, Any]] = []
     warnings: list[str] = []
     stack: list[tuple[str, int]] = []  # (block keyword, line number)
@@ -165,30 +178,33 @@ def parse_gsd_text(text: str, source: str = "<string>") -> dict[str, Any]:
             continue
 
         match = _KEY_RE.match(key)
-        if not match:
-            raise GSDParserError(f"{source} line {line_no}: malformed keyword")
-        value = _parse_value(raw_value)
-        name = match.group("name")
+        name = match.group("name") if match else key
         lowered_name = name.lower()
+        value = _parse_value(raw_value)
 
-        if lowered_name in _BLOCKS:
+        if match and lowered_name in _BLOCKS:
             if lowered_name == "module":
                 if stack:
                     raise GSDParserError(f"{source} line {line_no}: Module inside another block")
-                current_module = _new_module(value, source, line_no)
+                current_module = _new_module(value, line_no, warnings)
                 modules.append(current_module)
             stack.append((lowered_name, line_no))
             continue
         if stack:
             if current_module is not None and stack[-1][0] == "module" and lowered_name == "info_text":
-                current_module["info_text"] = value if isinstance(value, str) else None
+                current_module["info_text"] = value.strip() if isinstance(value, str) else None
             continue  # keywords inside blocks do not belong to the device
+        if not match:
+            warnings.append(f"line {line_no}: malformed keyword ignored")
+            continue
 
-        spelled = f"{name}({match.group('index')})" if match.group("index") is not None else name
-        key_id = spelled.lower()
-        if key_id in keywords:
-            warnings.append(f"line {line_no}: {spelled} repeated; the last value wins")
-        keywords[key_id] = (spelled, value)
+        if match.group("index") is not None:
+            entries = indexed.setdefault(lowered_name, (name, []))[1]
+            entries.append({"index": int(match.group("index")), "value": _jsonable(value)})
+            continue
+        if lowered_name in keywords:
+            warnings.append(f"line {line_no}: {name} repeated; the last value wins")
+        keywords[lowered_name] = (name, value)
 
     if not seen_header:
         raise GSDParserError(f"{source} is empty or not a PROFIBUS DP GSD file (no #Profibus_DP)")
@@ -196,7 +212,7 @@ def parse_gsd_text(text: str, source: str = "<string>") -> dict[str, Any]:
         block, line_no = stack[-1]
         raise GSDParserError(f"{source}: the {block} block opened on line {line_no} is never closed")
 
-    return _summarise(keywords, modules, warnings)
+    return _summarise(keywords, indexed, modules, warnings)
 
 
 class GSDParser:
@@ -207,15 +223,26 @@ class GSDParser:
         self._cache: dict[Path, tuple[int, int, dict[str, Any]]] = {}
 
     def resolve(self, filepath: str | Path) -> Path:
-        """Find ``filepath`` as given, or by file name in ``PROFIBUS_GSD_PATH``."""
+        """Locate ``filepath``.
+
+        Without ``PROFIBUS_GSD_PATH`` any readable path is accepted. With it, a
+        relative path is taken relative to that directory, and the resolved
+        file (symlinks followed) must lie inside it; other paths are refused
+        before checking whether they exist, so the error says nothing about
+        files elsewhere.
+        """
         path = Path(filepath).expanduser()
-        if path.is_file():
-            return path.resolve()
-        if self.base_path:
-            candidate = self.base_path / path.name
-            if candidate.is_file():
-                return candidate.resolve()
-        raise GSDParserError(f"GSD file not found: {filepath}")
+        if self.base_path is None:
+            if path.is_file():
+                return path.resolve()
+            raise GSDParserError(f"GSD file not found: {filepath}")
+        base = self.base_path.resolve()
+        resolved = (path if path.is_absolute() else base / path).resolve()
+        if not resolved.is_relative_to(base):
+            raise GSDParserError(f"{filepath} is outside PROFIBUS_GSD_PATH ({base}); only files there can be loaded")
+        if not resolved.is_file():
+            raise GSDParserError(f"GSD file not found in PROFIBUS_GSD_PATH: {filepath}")
+        return resolved
 
     def load(self, filepath: str | Path) -> dict[str, Any]:
         return self.load_with_status(filepath)[0]
@@ -238,9 +265,14 @@ class GSDParser:
             raise GSDParserError(f"Cannot read GSD file {path}: {exc.strerror}") from None
         if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 byte order mark
             raw = raw[3:]
-        # GSD files are ASCII in principle; vendors use Latin-1 for comments.
-        parsed = parse_gsd_text(raw.decode("latin-1"), source=str(path))
-        result = {"filepath": str(path), **parsed}
+        # GSD files are ASCII in principle; vendors use UTF-8 or Latin-1 for
+        # texts and comments. Latin-1 decodes any byte, so it is the fallback.
+        try:
+            text, encoding = raw.decode("utf-8"), "utf-8"
+        except UnicodeDecodeError:
+            text, encoding = raw.decode("latin-1"), "latin-1"
+        parsed = parse_gsd_text(text, source=str(path))
+        result = {"filepath": str(path), "encoding": encoding, **parsed}
         self._cache[path] = (stat.st_mtime_ns, stat.st_size, result)
         return result, False
 
@@ -250,31 +282,42 @@ class GSDParser:
 # ---------------------------------------------------------------------------
 
 
-def _strip_comment(line: str) -> str:
-    in_string = False
+def _strip_comment(line: str, in_string: bool = False) -> tuple[str, bool]:
+    """Cut a ``;`` comment outside strings. Returns the text and whether a string is still open."""
     for index, char in enumerate(line):
         if char == '"':
             in_string = not in_string
         elif char == ";" and not in_string:
-            return line[:index]
-    return line
+            return line[:index], False
+    return line, in_string
 
 
 def _logical_lines(text: str):
-    """Yield ``(first_line_number, line)`` with comments removed and continuations joined."""
+    """Yield ``(first_line_number, line)`` with comments removed and continuations joined.
+
+    A string may continue onto the next line, so whether we are inside a
+    string is carried across a ``\\`` continuation: a ``;`` in the continued
+    part of a string is text, not a comment.
+    """
     buffer = ""
     start: int | None = None
+    in_string = False
     for line_no, physical in enumerate(text.splitlines(), 1):
-        line = _strip_comment(physical).rstrip()
         if start is None:
             start = line_no
+            segment = physical
+        else:
+            segment = physical.lstrip()
+        line, in_string = _strip_comment(segment, in_string)
+        line = line.rstrip()
         if line.endswith("\\"):
-            buffer += line[:-1] + " "
+            body = line[:-1]
+            buffer += body if in_string else body.rstrip() + " "
             continue
         buffer += line
         if buffer.strip():
             yield start, buffer.strip()
-        buffer, start = "", None
+        buffer, start, in_string = "", None, False
     if buffer.strip() and start is not None:
         yield start, buffer.strip()
 
@@ -320,31 +363,47 @@ def _parse_value(raw: str) -> Any:
     return raw
 
 
-def _new_module(value: Any, source: str, line_no: int) -> dict[str, Any]:
-    if isinstance(value, _Text) and value.values:
+def _new_module(value: Any, line_no: int, warnings: list[str]) -> dict[str, Any]:
+    """Build a module entry; a header that cannot be decoded becomes an ``error`` and a warning."""
+    if isinstance(value, _Text):
         name, config = value.text, list(value.values)
     elif isinstance(value, str):
         name, config = value, []
     else:
-        raise GSDParserError(f"{source} line {line_no}: Module needs a quoted name followed by configuration bytes")
-    if not config:
-        raise GSDParserError(f"{source} line {line_no}: Module {name!r} has no configuration identifier")
-    try:
-        inputs, outputs = decode_config_identifiers(config)
-    except GSDParserError as exc:
-        raise GSDParserError(f"{source} line {line_no}: Module {name!r}: {exc}") from None
-    return {
+        name, config = str(value), []
+    name = name.strip()  # vendors pad names to a fixed width
+    module: dict[str, Any] = {
         "name": name,
-        "config_hex": bytes(config).hex(),
-        "input_length": inputs,
-        "output_length": outputs,
+        "config_hex": None,
+        "input_length": None,
+        "output_length": None,
         "reference": None,
         "info_text": None,
     }
+    if not isinstance(value, _Text | str):
+        error = "needs a quoted name followed by configuration bytes"
+    elif not config:
+        error = "has no configuration identifier"
+    else:
+        try:
+            module["config_hex"] = bytes(config).hex()
+        except ValueError:
+            pass
+        try:
+            module["input_length"], module["output_length"] = decode_config_identifiers(config)
+            return module
+        except GSDParserError as exc:
+            error = str(exc)
+    module["error"] = error
+    warnings.append(f"line {line_no}: Module {name!r} {error}; its I/O lengths are unknown")
+    return module
 
 
 def _summarise(
-    keywords: dict[str, tuple[str, Any]], modules: list[dict[str, Any]], warnings: list[str]
+    keywords: dict[str, tuple[str, Any]],
+    indexed: dict[str, tuple[str, list[dict[str, Any]]]],
+    modules: list[dict[str, Any]],
+    warnings: list[str],
 ) -> dict[str, Any]:
     def get(name: str) -> Any:
         entry = keywords.get(name.lower())
@@ -407,6 +466,7 @@ def _summarise(
         },
         "modules": modules,
         "keywords": {spelled: _jsonable(value) for spelled, value in keywords.values()},
+        "indexed_keywords": {spelled: entries for spelled, entries in indexed.values()},
         "warnings": warnings,
     }
 

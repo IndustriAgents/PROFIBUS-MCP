@@ -42,7 +42,16 @@ def test_decode_config_identifiers(cfg, expected):
     assert decode_config_identifiers(cfg) == expected
 
 
-@pytest.mark.parametrize("cfg", [[0x42], [0x42, 0x07, 0x01], [0xC0, 0x01], [0x300]])
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        [0x42],
+        [0x42, 0x07, 0x01],
+        [0xC0, 0x01],
+        [0x300],
+        [0x0F] + [0] * 15,  # special format: 15 manufacturer bytes is reserved (0-14 allowed)
+    ],
+)
 def test_decode_config_identifiers_rejects_truncated_or_bad(cfg):
     with pytest.raises(GSDParserError):
         decode_config_identifiers(cfg)
@@ -86,11 +95,18 @@ def test_realistic_modular_gsd():
 
     keywords = result["keywords"]
     assert keywords["freeze_mode_supp"] == 1  # original spelling kept, matched case-insensitively
-    assert keywords["Unit_Diag_Bit(17)"] == "Module fault; see channel diagnosis"
-    assert keywords["Ext_User_Prm_Data_Const(0)"] == [0, 0, 0]  # top level, not the module's
     assert keywords["Slave_Family"] == "3@IndustriAgents@Demo"
+    indexed = result["indexed_keywords"]
+    assert indexed["Unit_Diag_Bit"] == [
+        {"index": 16, "value": "Supply voltage missing"},
+        {"index": 17, "value": "Module fault; see channel diagnosis"},
+    ]
+    assert indexed["Ext_User_Prm_Data_Const"] == [{"index": 0, "value": [0, 0, 0]}]  # top level, not the module's
+    assert indexed["Ext_User_Prm_Data_Ref"] == [{"index": 2, "value": 1}]
     # Keywords inside PrmText / ExtUserPrmData / Module blocks stay out of the device keywords.
-    assert "Text(0)" not in keywords and "Prm_Text_Ref" not in keywords and "Ext_Module_Prm_Data_Len" not in keywords
+    assert "Prm_Text_Ref" not in keywords and "Ext_Module_Prm_Data_Len" not in keywords
+    assert "Text" not in indexed
+    assert result["warnings"] == []
 
 
 @pytest.mark.parametrize(
@@ -139,10 +155,24 @@ def test_unclosed_and_mismatched_blocks_are_errors():
         parse_gsd_text('#Profibus_DP\nModule = "m" 0x10\n')
     with pytest.raises(GSDParserError, match="EndModule"):
         parse_gsd_text("#Profibus_DP\nEndModule\n")
-    with pytest.raises(GSDParserError, match="configuration"):
-        parse_gsd_text('#Profibus_DP\nModule = "m"\nEndModule\n')
-    with pytest.raises(GSDParserError, match="truncated"):
-        parse_gsd_text('#Profibus_DP\nModule = "m" 0x42\nEndModule\n')
+
+
+@pytest.mark.parametrize(
+    ("header", "problem"),
+    [
+        ('Module = "m"', "no configuration identifier"),
+        ('Module = "m" 0x42', "truncated"),
+        ('Module = "m" 0x0F,0x01', "must be 0-14"),
+        ("Module = 0x10", "quoted name"),
+    ],
+)
+def test_a_broken_module_is_a_warning_not_a_failed_file(header, problem):
+    result = parse_gsd_text(f'#Profibus_DP\nIdent_Number = 0x1\n{header}\nEndModule\nModule = "ok" 0x10\nEndModule\n')
+    broken, good = result["modules"]
+    assert problem in broken["error"]
+    assert broken["input_length"] is None and broken["output_length"] is None
+    assert any(problem in warning for warning in result["warnings"])
+    assert (good["input_length"], good["output_length"]) == (1, 0) and "error" not in good
 
 
 def test_compact_station_lengths_and_warnings():
@@ -199,10 +229,98 @@ def test_cache_refreshes_when_the_file_changes(tmp_path):
 
 def test_lookup_by_name_in_gsd_path(tmp_path):
     shutil.copy(DATA_DIR / "IA_1234.gsd", tmp_path / "IA_1234.gsd")
+    (tmp_path / "sub").mkdir()
+    shutil.copy(DATA_DIR / "IA_1234.gsd", tmp_path / "sub" / "copy.gsd")
     parser = GSDParser(tmp_path)
     assert parser.load("IA_1234.gsd")["metadata"]["ident_number"] == "0x1234"
+    assert parser.load("sub/copy.gsd")["metadata"]["ident_number"] == "0x1234"
+    assert parser.load(tmp_path / "IA_1234.gsd")["metadata"]["ident_number"] == "0x1234"  # absolute, inside
     with pytest.raises(GSDParserError, match="not found"):
         parser.load("missing.gsd")
+
+
+def test_gsd_path_confines_load_gsd_file(tmp_path):
+    base = tmp_path / "gsd"
+    base.mkdir()
+    outside = tmp_path / "secret.gsd"
+    shutil.copy(DATA_DIR / "IA_1234.gsd", outside)
+    (base / "escape.gsd").symlink_to(outside)
+    parser = GSDParser(base)
+    for attempt in (str(outside), "../secret.gsd", "escape.gsd", "/etc/passwd"):
+        with pytest.raises(GSDParserError, match="outside PROFIBUS_GSD_PATH"):
+            parser.load(attempt)
+    # The refusal reads the same whether or not the file exists: no existence oracle.
+    messages = []
+    for attempt in ("../secret.gsd", "../does-not-exist.gsd"):
+        with pytest.raises(GSDParserError) as info:
+            parser.load(attempt)
+        messages.append(str(info.value).replace(attempt, "<path>"))
+    assert messages[0] == messages[1]
+
+
+def test_without_gsd_path_any_readable_file_is_accepted(tmp_path):
+    shutil.copy(DATA_DIR / "IA_1234.gsd", tmp_path / "any.gsd")
+    assert GSDParser().load(tmp_path / "any.gsd")["metadata"]["ident_number"] == "0x1234"
+
+
+def test_vendor_quirks():
+    result = GSDParser().load(DATA_DIR / "vendor_quirks.gsd")
+    assert result["encoding"] == "utf-8"
+    assert result["metadata"]["vendor_name"] == "Prüfgeräte GmbH"
+    assert result["metadata"]["model_name"] == "Messgerät 2000"
+    # A ';' in the continued part of a string is text, not a comment.
+    assert result["keywords"]["Info_Text"] == "first part of a long text, second part; still text"
+    # Repeated indexed keywords are kept, in order, with spaces inside "( n )".
+    assert result["indexed_keywords"]["Ext_User_Prm_Data_Ref"] == [
+        {"index": 0, "value": 1},
+        {"index": 1, "value": 2},
+        {"index": 1, "value": 3},
+        {"index": 1, "value": 4},
+    ]
+    # Padded names are trimmed.
+    names = [module["name"] for module in result["modules"]]
+    assert names == ["PZD( 2W Cons.)", "AI16 (temperature)", "Broken: 15 vendor bytes"]
+    assert (result["modules"][0]["input_length"], result["modules"][0]["output_length"]) == (4, 4)
+    assert "must be 0-14" in result["modules"][2]["error"]
+    # A non-standard keyword at top level is a warning; inside a block it is skipped.
+    assert any("malformed keyword ignored" in warning for warning in result["warnings"])
+    assert not any("Vendor-Option" in warning for warning in result["warnings"])
+    assert not any("repeated" in warning for warning in result["warnings"])
+
+
+def test_reviewer_nasty_samples():
+    # Valid but awkward files written for the review: comments and a stray
+    # quote before the header, CRLF, tabs, lower-case keywords, ';' and '='
+    # inside strings, continuation with a comment after the backslash,
+    # special-format identifiers and a decimal config without spaces.
+    compact = GSDParser().load(DATA_DIR / "nasty_compact.gsd")
+    assert compact["metadata"]["vendor_name"] == "ACME; Automation = Inc"
+    assert compact["metadata"]["ident_number"] == "0xBEEF"
+    assert (compact["io_config"]["input_length"], compact["io_config"]["output_length"]) == (4, 4)
+    module = compact["modules"][0]
+    assert module["config_hex"] == "c24183aabb" and module["info_text"] == "has = and ; inside"
+    assert compact["indexed_keywords"]["Ext_User_Prm_Data_Const"] == [{"index": 0, "value": [0, 0, 0, 0, 10]}]
+    assert compact["indexed_keywords"]["Ext_User_Prm_Data_Ref"] == [{"index": 3, "value": 1}, {"index": 3, "value": 2}]
+    assert compact["warnings"] == []
+
+    modular = GSDParser().load(DATA_DIR / "nasty_modular.gsd")
+    lengths = {m["name"]: (m["input_length"], m["output_length"]) for m in modular["modules"]}
+    assert lengths == {
+        "empty": (0, 0),
+        "8 DI general": (1, 0),
+        "16 DO, decimal, no spaces": (0, 3),  # 32 = 1 byte out, 33 = 2 bytes out
+        "mixed general+special": (132, 2),  # 4 + 4 + 124 in (0x7D: 62 words), 2 out
+        "word consistent IO": (16, 16),
+        "special, vendor bytes only": (0, 0),
+    }
+    assert modular["warnings"] == []
+
+
+def test_latin1_fallback_is_reported(tmp_path):
+    path = tmp_path / "latin1.gsd"
+    path.write_bytes(b'#Profibus_DP\nVendor_Name = "Ger\xe4te"\n')
+    result = GSDParser().load(path)
+    assert result["encoding"] == "latin-1" and result["metadata"]["vendor_name"] == "Geräte"
 
 
 def test_latin1_comments_and_bom_are_accepted(tmp_path):

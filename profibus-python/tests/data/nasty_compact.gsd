@@ -1,0 +1,62 @@
+; ===================================================
+; Nasty but valid GSD: comments before the header, CRLF, tabs
+; "unbalanced quote in a comment
+
+#Profibus_DP
+GSD_Revision        = 5
+vendor_name	= "ACME; Automation = Inc"   ; lower-case keyword, ; and = inside string
+Model_Name          = "X-1000"
+Revision            = "V1.0"
+Ident_Number        = 0XBEEF
+Protocol_Ident      = 0
+Station_Type        = 0
+FMS_supp            = 0
+Hardware_Release    = "A1"
+Software_Release    = "Z1"
+9.6_supp            = 1
+1.5M_supp           = 1
+12M_supp            = 1
+MaxTsdr_9.6         = 60
+MaxTsdr_1.5M        = 150
+Slave_Family        = 3@TdF@ACME
+OrderNumber         = "6ES7 123-4AB56-7CD8"
+Implementation_Type = "VPC3+S"
+Modular_Station     = 0
+Max_User_Prm_Data_Len = 5
+Ext_User_Prm_Data_Const(0) = 0x00,0x00,\
+                             0x00, \   ; continuation with comment after the backslash
+                             0x00,0x0A
+Ext_User_Prm_Data_Ref(3) = 1
+Ext_User_Prm_Data_Ref(3) = 2
+PrmText = 1
+Text(0) = "Off"
+Text (1) = "On; really"
+EndPrmText
+ExtUserPrmData = 1 "Mode = fast"
+Bit(0) 0 0-1
+Prm_Text_Ref = 1
+Changeable = 1
+EndExtUserPrmData
+ExtUserPrmData = 2 "Filter"
+Unsigned8 3 0-255
+EndExtUserPrmData
+Unit_Diag_Area = 16-17
+Value(0) = "ok"
+Unit_Diag_Area_End
+UnitDiagType = 129
+X_Unit_Diag_Bit(0) = "Short circuit"
+EndUnitDiagType
+Channel_Diag(16) = "Wire break"
+;
+; single module, special format, output then input length byte + 2 vendor bytes
+Module = "2 words out/4 bytes in consistent; vendor" 0xC2,0x41,\
+         0x83,0xAA,0xBB
+1
+Info_Text = "has = and ; inside"
+Ext_Module_Prm_Data_Len = 1
+Ext_User_Prm_Data_Const(0) = 0x05
+Data_Area_Beg
+Area_Ref = 0
+Consistency = 1
+Data_Area_End
+EndModule

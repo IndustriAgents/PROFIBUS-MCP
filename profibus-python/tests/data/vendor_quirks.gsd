@@ -1,0 +1,38 @@
+; Reduced sample reproducing quirks seen in real vendor GSD files (written for
+; the tests; no vendor content): UTF-8 texts, names padded to a fixed width,
+; repeated indexed keywords, spaces inside "( n )", a non-standard keyword,
+; a string continued onto the next line, and a broken module.
+#Profibus_DP
+GSD_Revision     = 4
+Vendor_Name      = "Prüfgeräte GmbH"
+Model_Name       = "Messgerät 2000"
+Ident_Number     = 0x0AB1
+Station_Type     = 0
+Info_Text        = "first part of a long text, \
+                    second part; still text"
+Vendor-Specific  = 1
+Modular_Station  = 1
+Max_Module       = 3
+Max_Input_Len    = 16
+Max_Output_Len   = 16
+
+; Bit-field parameters share byte 1, so the same index repeats.
+Ext_User_Prm_Data_Ref( 0 )  = 1
+Ext_User_Prm_Data_Ref( 1 )  = 2
+Ext_User_Prm_Data_Ref( 1 )  = 3
+Ext_User_Prm_Data_Ref( 1 )  = 4
+
+ExtUserPrmData = 2 "Mode"
+Vendor-Option = 7
+Bit(0) 0 0-1
+EndExtUserPrmData
+
+Module = "PZD( 2W Cons.)             " 0xF1
+1
+EndModule
+Module="AI16 (temperature)   " 0x50
+2
+EndModule
+Module = "Broken: 15 vendor bytes" 0x0F,0x01
+3
+EndModule
