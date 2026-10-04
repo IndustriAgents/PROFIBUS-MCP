@@ -28,7 +28,8 @@ It runs until Ctrl-C (or SIGTERM) and logs to stderr.
 
 Input bytes change every update interval; output bytes hold what was last
 written. Both slaves always report status `OK`. The GSD files describe the
-simulated slaves only; no real device uses them.
+simulated slaves only. The ident numbers are arbitrary and may coincide with
+real devices, so never put the mock or its GSD files on a real bus.
 
 ## Protocol
 

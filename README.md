@@ -24,18 +24,25 @@ The server has two backends, chosen with `PROFIBUS_BACKEND`:
 | `mock` | `profibus-mock-slave` over TCP (JSON lines, `127.0.0.1:7100` by default) | Works for every tool. The data comes from the mock's simulated slaves; no PROFIBUS telegrams are involved. |
 | `serial` (default) | A DP master on an RS-485 adapter | **Not implemented.** Bus tools return `success: false` with a "not implemented" error. The port is never opened and nothing is sent. |
 
-Every bus tool reports the backend that answered in `meta.backend`, on success
-and on failure. No tool returns invented data: a slave that does not answer, a
-refused write or an unimplemented backend is always a `success: false`
-envelope.
+Every bus tool reports the configured backend in `meta.backend`, on success and
+on failure, including when its arguments are rejected. No tool returns invented
+data: a slave that does not answer, a refused write or an unimplemented backend
+is always a `success: false` envelope.
+
+Writes are **off by default**. `write_outputs` and `write_slave_by_alias`
+refuse every call unless `PROFIBUS_WRITES_ENABLED=true` is set in the process
+environment (for example the MCP client's `env` block) or in a file passed with
+`--env-file`. A `.env` file found in the working directory may set connection
+settings but cannot enable writes; the server ignores the switch there and logs
+a warning. Every write reports `meta.outcome`: `written`, `rejected`,
+`not_sent`, or `unknown` when the request went out but no reply confirmed it.
+An `unknown` write may have been applied, and it is never re-sent
+automatically. See [SECURITY.md](SECURITY.md).
 
 `load_gsd_file` parses real PROFIBUS DP GSD files (the ASCII keyword format:
 `#Profibus_DP`, `Keyword = value`, `Module ... EndModule`) and decodes each
-module's I/O lengths from its configuration bytes. It needs no backend.
-
-Writes are **off by default**. `write_outputs` and `write_slave_by_alias`
-refuse every call unless `PROFIBUS_WRITES_ENABLED=true`; see
-[SECURITY.md](SECURITY.md).
+module's I/O lengths from its configuration bytes. It needs no backend. With
+`PROFIBUS_GSD_PATH` set, it only opens files inside that directory.
 
 ### Known issues and limitations
 
@@ -48,6 +55,9 @@ refuse every call unless `PROFIBUS_WRITES_ENABLED=true`; see
   fixed slaves (addresses 5 and 8) and always reports their status as `OK`.
 - `read_diagnosis` returns the status and ident number the backend reports; the
   standard 6-byte DP diagnosis is not decoded yet.
+- The server has no tool to read back a slave's outputs, so after a write with
+  outcome `unknown` the check has to happen elsewhere (for the mock, its
+  `read_outputs` request).
 - GSD files: keywords inside `PrmText`, `ExtUserPrmData` and other blocks are
   skipped rather than returned. GSDML (XML) files are rejected: they describe
   PROFINET IO devices.
@@ -57,7 +67,8 @@ refuse every call unless `PROFIBUS_WRITES_ENABLED=true`; see
 
 - Tools for bus scanning, cyclic I/O and diagnostics (`scan_bus`,
   `read_inputs`, `write_outputs`, `read_diagnosis`, `test_slave_communication`)
-- Read-only by default; writes need `PROFIBUS_WRITES_ENABLED=true`
+- Read-only by default; writes need `PROFIBUS_WRITES_ENABLED=true` from the
+  environment or `--env-file`, never from an implicit `.env`
 - GSD keyword-file parser behind `load_gsd_file`, with DP configuration-byte
   decoding
 - Alias-based slave map (`SLAVE_MAP_FILE`)
@@ -130,8 +141,9 @@ client at the project directory, and keep the mock running:
 ```
 
 Without `PROFIBUS_BACKEND=mock` the server uses the `serial` backend: it
-starts, but bus tools answer "not implemented". All settings are listed under
-[Configuration](profibus-python/README.md#configuration).
+starts, but bus tools answer "not implemented". To allow writes, add
+`"PROFIBUS_WRITES_ENABLED": "true"` to the same `env` block. All settings are
+listed under [Configuration](profibus-python/README.md#configuration).
 
 ## Tools
 
@@ -145,12 +157,14 @@ starts, but bus tools answer "not implemented". All settings are listed under
 | `list_slaves` | Lists the aliases defined in `SLAVE_MAP_FILE` |
 | `read_slave_by_alias(alias, length?)` | `read_inputs` for the slave behind an alias |
 | `write_slave_by_alias(alias, data)` | `write_outputs` for the slave behind an alias; same write gate |
-| `load_gsd_file(filepath)` | Parses a GSD file: vendor, model, ident number, baud rates, modules and their I/O lengths |
+| `load_gsd_file(filepath)` | Parses a GSD file: vendor, model, ident number, baud rates, modules and their I/O lengths. Confined to `PROFIBUS_GSD_PATH` when set |
 | `ping` | Server version, backend, write gate and alias count (does not contact the bus) |
 | `get_master_status` | Backend, port or mock endpoint, master address, timeouts and write gate |
 
 Every tool returns `{ success, data, error, meta }`, and every tool has a
-description that MCP clients show to the model.
+description that MCP clients show to the model. Addresses, lengths and byte
+values must be JSON integers: strings, floats and booleans are refused with an
+`Invalid arguments` envelope.
 
 ## Part of IndustriConnect
 

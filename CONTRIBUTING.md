@@ -81,19 +81,32 @@ uv sync --locked
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
 uv run --no-sync pytest -v
+rm -rf .venv-lowest
+uv venv --python 3.11 .venv-lowest
+uv pip install --python .venv-lowest --resolution lowest-direct -e . --group dev
+.venv-lowest/bin/python -m pytest -q
 cd ../profibus-mock-slave
 uv sync --locked
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
 uv run --no-sync pytest -v
+rm -rf .venv-lowest
+uv venv --python 3.11 .venv-lowest
+uv pip install --python .venv-lowest --resolution lowest-direct -e . --group dev
+.venv-lowest/bin/python -m pytest -q
 uv run --no-sync profibus-mock-slave --help
 cd ..
 ```
 
+The `.venv-lowest` runs install the lowest version of each direct dependency
+that `pyproject.toml` allows: every floor there has to be one the tests pass
+on. If you raise a floor or use a newer API, raise the floor too.
+
 The server's suite includes `tests/test_integration_stdio.py`, which starts the
 mock slave itself (with `uv run`, on a free port) and drives the real server
 over stdio with the MCP client SDK: every tool, the write gate, stdout carrying
-only JSON-RPC, and a clean exit on a bad setting. If you add or rename a tool,
+only JSON-RPC (unbuffered, so a stray `print()` fails it), a `.env` that tries
+to enable writes, and a clean exit on a bad setting. If you add or rename a tool,
 update the expected tool set there and in `tests/test_tools.py`. `ruff format .`
 fixes formatting.
 
@@ -126,7 +139,11 @@ you used.
   kills the server. The model needs to be told what went wrong. That includes
   bad arguments.
 - Read configuration in `ProfibusConfig.from_env()`, never at import time, so
-  `.env` reaches every setting.
+  `.env` reaches every setting. A new safety switch must be named
+  `PROFIBUS_*_ENABLED` so an implicit `.env` cannot set it.
+- A write is sent at most once. Only a connection that was never made may be
+  retried, and every write reports `meta.outcome`.
+- Tool arguments for addresses, lengths and byte values are strict integers.
 - Every tool has a docstring: it is the description the model sees.
 - Keep tool names and argument names aligned with the other IndustriConnect
   servers.

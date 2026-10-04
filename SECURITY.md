@@ -24,6 +24,21 @@ application on the office network.
   unless `PROFIBUS_WRITES_ENABLED=true` is set in the server's environment;
   only set it on a lab bench or when you mean it. There is no undo, and a
   language model will call a tool it has been given.
+- **The switch never comes from an implicit `.env`.** A server started by an
+  MCP client may run in the client's project directory, which may not be
+  trusted. The `.env` the server finds there may set connection settings, but
+  `PROFIBUS_WRITES_ENABLED` (any `PROFIBUS_*_ENABLED`) in it is ignored with a
+  warning on stderr. Enable writes in the process environment (the client's
+  `env` block) or in a file you pass with `--env-file`.
+- **Treat an `unknown` write as possibly applied.** A write whose request went
+  out but whose reply was lost reports `meta.outcome: "unknown"`. The server
+  never re-sends it; check the outputs before trying again.
+- **Confine `load_gsd_file`.** Without `PROFIBUS_GSD_PATH`, `load_gsd_file`
+  opens any file the server's account can read. It returns only parsed GSD
+  content and its errors do not echo file contents, but whether it says "not
+  found" or "not a GSD file" reveals whether a path exists. Set
+  `PROFIBUS_GSD_PATH` to a directory of GSD files; then every other path is
+  refused before it is checked (symlinks are followed first).
 - **Do not expose the server beyond the host running the client.** It is a
   stdio process meant to run next to the MCP client, not a network service.
 - **Limit who can open the adapter.** Access to the serial device
@@ -35,7 +50,10 @@ application on the office network.
 The `serial` backend in `profibus-python` is not implemented (see the
 [README](README.md#status)): its bus tools return `success: false` and it never
 opens the configured port, because an RS-485 adapter opened without a DP stack
-in control can switch its line driver on and disturb a running bus. That does
+in control can switch its line driver on and disturb a running bus. For the
+same reason `PROFIBUS_PORT` accepts only device paths and the `socket://`,
+`rfc2217://` and `loop://` URLs: other pyserial URL handlers (such as
+`hwgrep://`) can open ports while merely being configured. That does
 not make the advice above optional: the switches it describes are the ones that
 will gate real telegrams once a DP master exists.
 
