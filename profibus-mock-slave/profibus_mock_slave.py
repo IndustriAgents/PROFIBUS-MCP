@@ -2,8 +2,13 @@
 
 No PROFIBUS telegrams are involved: each request is one JSON object on one
 line, and each reply is one JSON line, ``{"success": true, "data": ...}`` or
-``{"success": false, "error": "..."}``. A malformed request gets an error
-reply and the connection stays open.
+``{"success": false, "error": "...", "applied": false}``. A malformed request
+gets an error reply and the connection stays open.
+
+``"applied": false`` means the request was refused before anything was
+changed (every check runs before a buffer is touched). An error reply without
+it, such as an internal error, makes no such promise: a client must treat a
+write as possibly applied.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import os
 import random
 import signal
 import sys
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +45,7 @@ class MockConfig:
     port: int = 7100
     update_interval: float = 1.0
     verbose: bool = False
+    exit_on_stdin_eof: bool = False
 
 
 @dataclass
@@ -133,7 +140,7 @@ class ProfibusMockServer:
                     line = await reader.readline()
                 except ValueError:
                     # Longer than MAX_LINE_BYTES: the stream cannot be resynchronised.
-                    await self._send(writer, _error(f"Request longer than {MAX_LINE_BYTES} bytes"))
+                    await self._send(writer, _refused(f"Request longer than {MAX_LINE_BYTES} bytes"))
                     break
                 if not line:
                     break
@@ -155,12 +162,14 @@ class ProfibusMockServer:
         try:
             request = json.loads(line)
         except (UnicodeDecodeError, ValueError):
-            return _error("Invalid JSON")
+            return _refused("Invalid JSON")
         try:
             return self._dispatch(request)
         except RequestError as exc:
-            return _error(str(exc))
+            # Every RequestError is raised before a buffer is changed.
+            return _refused(str(exc))
         except Exception as exc:  # a bad request must not drop the connection
+            # Unexpected: nothing guarantees the request had no effect.
             return _error(f"Internal error: {type(exc).__name__}: {exc}")
 
     def _dispatch(self, request: Any) -> dict[str, Any]:
@@ -220,7 +229,13 @@ def _ok(data: Any) -> dict[str, Any]:
 
 
 def _error(message: str) -> dict[str, Any]:
+    """A failure that may have happened after something was changed."""
     return {"success": False, "error": message}
+
+
+def _refused(message: str) -> dict[str, Any]:
+    """A refusal before anything was changed."""
+    return {"success": False, "error": message, "applied": False}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -231,6 +246,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # reported like a bad flag instead of raising a traceback.
     parser.add_argument("--port", type=int, default=env.get("MOCK_PROFIBUS_PORT", "7100"))
     parser.add_argument("--update-interval", type=float, default=env.get("MOCK_PROFIBUS_UPDATE_INTERVAL", "1.0"))
+    parser.add_argument(
+        "--exit-on-stdin-eof",
+        action="store_true",
+        help="stop when stdin reaches end of file, e.g. because the parent process died (used by tests)",
+    )
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -253,6 +273,8 @@ async def run_server(config: MockConfig) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
+    if config.exit_on_stdin_eof:
+        watch_stdin_eof(loop, stop)
 
     try:
         await stop.wait()
@@ -261,9 +283,38 @@ async def run_server(config: MockConfig) -> None:
         await server.stop()
 
 
+def watch_stdin_eof(loop: asyncio.AbstractEventLoop, stop: asyncio.Event, stream: Any = None) -> threading.Thread:
+    """Set ``stop`` once ``stream`` (default: stdin) reaches end of file.
+
+    A parent that starts the mock with a stdin pipe and then dies, even by
+    SIGKILL, closes the pipe, so the mock does not outlive it. A daemon thread
+    is used because a blocking read cannot be cancelled and must not delay
+    exit.
+    """
+    source = stream if stream is not None else sys.stdin.buffer
+
+    def drain() -> None:
+        try:
+            while source.read(4096):
+                pass
+        except (OSError, ValueError):
+            pass
+        loop.call_soon_threadsafe(stop.set)
+
+    thread = threading.Thread(target=drain, name="stdin-eof-watch", daemon=True)
+    thread.start()
+    return thread
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    config = MockConfig(host=args.host, port=args.port, update_interval=args.update_interval, verbose=args.verbose)
+    config = MockConfig(
+        host=args.host,
+        port=args.port,
+        update_interval=args.update_interval,
+        verbose=args.verbose,
+        exit_on_stdin_eof=args.exit_on_stdin_eof,
+    )
     try:
         asyncio.run(run_server(config))
     except KeyboardInterrupt:

@@ -34,10 +34,15 @@ real devices, so never put the mock or its GSD files on a real bus.
 ## Protocol
 
 One JSON object per line in, one JSON line out: `{"success": true, "data": ...}`
-or `{"success": false, "error": "..."}`. A malformed request (not JSON, not an
-object, a non-integer address, an out-of-range byte) gets an error reply and
-the connection stays open. A line over 64 KiB gets an error reply and the
-connection is closed.
+or `{"success": false, "error": "...", "applied": false}`. A malformed request
+(not JSON, not an object, a non-integer address, an out-of-range byte) gets an
+error reply and the connection stays open. A line over 64 KiB gets an error
+reply and the connection is closed.
+
+`"applied": false` means the request was refused before anything changed:
+every check runs before a buffer is touched. An error reply without it (an
+internal error) makes no such promise, so a client has to treat a write as
+possibly applied.
 
 | Request | Reply `data` |
 |---------|--------------|
@@ -58,6 +63,7 @@ Addresses are integers 0-125; an address without a slave gets
 | `--port` | `MOCK_PROFIBUS_PORT` | `7100` (`0` picks a free port) |
 | `--update-interval` | `MOCK_PROFIBUS_UPDATE_INTERVAL` | `1.0` (seconds) |
 | `--verbose` | `MOCK_PROFIBUS_VERBOSE` | off (logs every connection and update) |
+| `--exit-on-stdin-eof` | | off. Stop when stdin reaches end of file; a test that starts the mock with a stdin pipe can then die (even by SIGKILL) without leaving it running |
 
 The slave list is fixed in `default_slaves()` in `profibus_mock_slave.py`.
 

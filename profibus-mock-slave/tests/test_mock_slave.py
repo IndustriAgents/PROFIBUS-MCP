@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
 
 import pytest
 
-from profibus_mock_slave import MAX_LINE_BYTES, MockConfig, ProfibusMockServer, parse_args
+from profibus_mock_slave import MAX_LINE_BYTES, MockConfig, ProfibusMockServer, parse_args, watch_stdin_eof
 
 
 def dispatch(request) -> dict:
@@ -49,12 +56,26 @@ def test_bad_requests_get_an_error_reply(request_, message):
     reply = dispatch(request_)
     assert reply["success"] is False
     assert message in reply["error"]
+    # Every check runs before a buffer changes, so these are explicit refusals.
+    assert reply["applied"] is False
+
+
+def test_internal_error_does_not_claim_nothing_was_applied(monkeypatch):
+    server = ProfibusMockServer(MockConfig())
+
+    def explode(request):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(server, "_dispatch", explode)
+    reply = server.handle_line(b'{"op": "write_outputs", "address": 5, "data": [1]}')
+    assert reply["success"] is False and "Internal error" in reply["error"]
+    assert "applied" not in reply
 
 
 def test_invalid_json_gets_an_error_reply():
     server = ProfibusMockServer(MockConfig())
-    assert server.handle_line(b"{nope") == {"success": False, "error": "Invalid JSON"}
-    assert server.handle_line(b"\xff\xfe") == {"success": False, "error": "Invalid JSON"}
+    assert server.handle_line(b"{nope") == {"success": False, "error": "Invalid JSON", "applied": False}
+    assert server.handle_line(b"\xff\xfe") == {"success": False, "error": "Invalid JSON", "applied": False}
 
 
 def test_write_never_grows_the_output_buffer():
@@ -133,3 +154,62 @@ def test_environment_is_read_by_parse_args(monkeypatch):
     monkeypatch.setenv("MOCK_PROFIBUS_PORT", "not-a-port")
     with pytest.raises(SystemExit):
         parse_args([])
+
+
+def test_stdin_watch_sets_stop_at_end_of_file():
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        watch_stdin_eof(asyncio.get_running_loop(), stop, io.BytesIO(b"some input, then EOF"))
+        await asyncio.wait_for(stop.wait(), 5)
+
+    asyncio.run(scenario())
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses SIGKILL")
+def test_mock_exits_when_its_parent_is_killed():
+    """A parent killed with SIGKILL (like a killed pytest run) must not leave the mock behind."""
+    port = _free_port()
+    parent_script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-m', 'profibus_mock_slave', '--port', sys.argv[1],"
+        " '--exit-on-stdin-eof'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(600)\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", parent_script, str(port)], stdout=subprocess.PIPE)
+    child_pid = int(parent.stdout.readline())
+    try:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "the mock never started listening"
+                time.sleep(0.1)
+        parent.send_signal(signal.SIGKILL)
+        parent.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while _alive(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _alive(child_pid), "the mock outlived its killed parent"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        if _alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
