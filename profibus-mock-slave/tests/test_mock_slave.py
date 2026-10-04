@@ -98,7 +98,8 @@ def test_connection_survives_bad_requests_and_update_task_is_kept_and_stopped():
         finally:
             writer.close()
             await writer.wait_closed()
-            await server.stop()
+            # A stop() that does not cancel the update task would hang here.
+            await asyncio.wait_for(server.stop(), 2)
         assert task.done()
         assert server._update_task is None
 
@@ -119,7 +120,7 @@ def test_oversized_request_line_is_answered_then_closed():
         finally:
             writer.close()
             await writer.wait_closed()
-            await server.stop()
+            await asyncio.wait_for(server.stop(), 2)
 
     asyncio.run(scenario())
 

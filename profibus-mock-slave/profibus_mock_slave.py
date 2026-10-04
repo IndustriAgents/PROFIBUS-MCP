@@ -104,10 +104,11 @@ class ProfibusMockServer:
 
     async def stop(self) -> None:
         if self._update_task is not None:
-            self._update_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._update_task
-            self._update_task = None
+            task, self._update_task = self._update_task, None
+            task.cancel()
+            # gather() absorbs the task's own CancelledError but still lets a
+            # cancellation of stop() itself propagate (suppress() would hide it).
+            await asyncio.gather(task, return_exceptions=True)
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
