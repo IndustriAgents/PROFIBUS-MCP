@@ -73,6 +73,8 @@ async def test_every_tool_has_a_description_and_write_tools_say_so():
             assert "physical outputs" in tool.description
             assert "PROFIBUS_WRITES_ENABLED" in tool.description
             assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is True
+            # A write must never advertise idempotency, or clients may retry it on their own.
+            assert tool.annotations.idempotentHint is False
         else:
             assert tool.annotations.readOnlyHint is True, name
 
@@ -205,7 +207,7 @@ async def test_unexpected_backend_exception_becomes_an_envelope():
         # An unexpected failure during a write cannot prove nothing was sent.
         result = await call(session, "write_outputs", {"slave_address": 5, "data": [1]})
         assert result["success"] is False and "may have been applied" in result["error"]
-        assert result["meta"]["outcome"] == "unknown"
+        assert result["meta"]["outcome"] == "unknown" and result["meta"]["request_sent"] is True
 
 
 async def test_backend_not_implemented_write_is_not_sent():

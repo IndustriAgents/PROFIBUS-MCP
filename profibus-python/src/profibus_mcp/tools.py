@@ -72,7 +72,8 @@ NOT_SENT: dict[str, Any] = {"outcome": "not_sent", "request_sent": False}
 
 _READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 _LOCAL = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
-_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True)
+# Writes never advertise idempotency: a client must not retry them on its own.
+_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 
 
 class SlaveMap:
@@ -193,7 +194,13 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
             log.exception("unexpected error in a PROFIBUS write")
             return err(
                 f"Unexpected error: {exc}. The write may have been applied; check the slave's outputs before retrying.",
-                {"backend": backend, "slave_address": slave_address, "outcome": "unknown", **(extra or {})},
+                {
+                    "backend": backend,
+                    "slave_address": slave_address,
+                    "outcome": "unknown",
+                    "request_sent": True,
+                    **(extra or {}),
+                },
             )
         return ok({"slave_address": slave_address, "written_bytes": written, **(extra or {})}, meta)
 
