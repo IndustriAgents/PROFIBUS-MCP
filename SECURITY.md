@@ -3,9 +3,9 @@
 ## What this server is, in security terms
 
 This repository is a bridge between a language model and a PROFIBUS DP
-network. The MCP server speaks stdio to its client and talks to the bus
-through a serial PROFIBUS adapter. That puts the trust boundary *inside* the
-server: whatever the model decides to call, the bus is asked to do.
+network. The MCP server speaks stdio to its client and is meant to talk to the
+bus through a PROFIBUS master interface. That puts the trust boundary *inside*
+the server: whatever the model decides to call, the bus is asked to do.
 
 PROFIBUS was designed for a physically isolated fieldbus and has no
 authentication or encryption of its own. Anything that can reach the RS-485
@@ -16,14 +16,14 @@ application on the office network.
 
 ## Running it safely
 
-- **Start with the mocks.** Run the server with `PROFIBUS_MOCK=true`, which
-  never opens a serial port, and use `profibus-mock-slave` to exercise
-  PROFIBUS tooling without touching real plant. Do that first, every time.
-- **Turn writes off until you mean otherwise.** `write_outputs` and
-  `write_slave_by_alias` change physical outputs. They are currently enabled
-  unless you set `PROFIBUS_WRITES_ENABLED=false` in the server's environment,
-  so set it explicitly for anything that is not a lab bench. There is no undo,
-  and a language model will call a tool it has been given.
+- **Start with the mock.** Run `profibus-mock-slave` and the server with
+  `PROFIBUS_BACKEND=mock`, which never opens a serial port, to exercise the
+  tools without touching real plant. Do that first, every time.
+- **Writes stay off until you mean otherwise.** `write_outputs` and
+  `write_slave_by_alias` change physical outputs. They refuse every call
+  unless `PROFIBUS_WRITES_ENABLED=true` is set in the server's environment;
+  only set it on a lab bench or when you mean it. There is no undo, and a
+  language model will call a tool it has been given.
 - **Do not expose the server beyond the host running the client.** It is a
   stdio process meant to run next to the MCP client, not a network service.
 - **Limit who can open the adapter.** Access to the serial device
@@ -32,11 +32,15 @@ application on the office network.
 - **Never point it at a safety system.** Safety-instrumented functions,
   including PROFIsafe devices, are out of scope for this repository.
 
-The serial master in `profibus-python` is still a scaffold (see the
-[README](README.md#status)): it opens the configured port but does not yet
-exchange DP telegrams. That does not make the advice above optional: the
-switches it describes are the ones that will gate real telegrams once they are
-sent.
+The `serial` backend in `profibus-python` is not implemented (see the
+[README](README.md#status)): its bus tools return `success: false` and it never
+opens the configured port, because an RS-485 adapter opened without a DP stack
+in control can switch its line driver on and disturb a running bus. That does
+not make the advice above optional: the switches it describes are the ones that
+will gate real telegrams once a DP master exists.
+
+The mock slave listens on `127.0.0.1` by default and has no authentication.
+Keep it on loopback; `--host 0.0.0.0` exposes it to the network.
 
 ## Supported versions
 
@@ -62,6 +66,5 @@ In scope: the MCP server (`profibus-python`) and the mock slave
 `PROFIBUS-Project` submodule; report it here either way.
 
 Out of scope: vulnerabilities in PROFIBUS itself (the lack of authentication
-is a property of the protocol), in third-party libraries such as `pyserial`,
-`lxml` or the `mcp` SDK (report those upstream), and in adapter or device
-firmware.
+is a property of the protocol), in third-party libraries such as `pyserial`
+or the `mcp` SDK (report those upstream), and in adapter or device firmware.

@@ -23,7 +23,8 @@
 ## Checklist
 
 - [ ] Tools still return the shared `{ success, data, error, meta }` envelope.
-- [ ] I tested against the mock (`PROFIBUS_MOCK=true` and/or `profibus-mock-slave`).
+- [ ] I tested against the mock (`profibus-mock-slave` with `PROFIBUS_BACKEND=mock`).
+- [ ] Every new or changed tool has a docstring, validates its arguments and still returns an envelope on failure.
 - [ ] Nothing was tested against production equipment.
 - [ ] `stdout` is still clean — all logging goes to `stderr`.
 - [ ] The CI checks pass locally (see [CONTRIBUTING.md](https://github.com/IndustriAgents/PROFIBUS-MCP/blob/main/CONTRIBUTING.md#testing-a-change)).
