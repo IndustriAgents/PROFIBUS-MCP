@@ -74,6 +74,8 @@ def test_empty_values_mean_default():
         ({"PROFIBUS_MAX_RETRIES": "-1"}, "PROFIBUS_MAX_RETRIES"),
         ({"PROFIBUS_RETRY_BACKOFF_BASE": "fast"}, "PROFIBUS_RETRY_BACKOFF_BASE"),
         ({"PROFIBUS_MOCK_PORT": "70000"}, "PROFIBUS_MOCK_PORT"),
+        ({"PROFIBUS_MOCK_HOST": "münchen..example"}, "PROFIBUS_MOCK_HOST"),  # empty label: no IDNA form
+        ({"PROFIBUS_MOCK_HOST": "ü" * 70}, "PROFIBUS_MOCK_HOST"),  # label too long
         # A typo must not silently turn into "false" (or "true").
         ({"PROFIBUS_WRITES_ENABLED": "enable"}, "PROFIBUS_WRITES_ENABLED must be true or false"),
         ({"PROFIBUS_MOCK": "true", "PROFIBUS_BACKEND": "serial"}, "conflicts|asks for the mock backend"),
@@ -96,3 +98,8 @@ def test_config_cmds_flag_is_reported_as_ignored():
     config = ProfibusConfig.from_env({"PROFIBUS_CONFIG_CMDS_ENABLED": "true"})
     assert any("PROFIBUS_CONFIG_CMDS_ENABLED is ignored" in warning for warning in config.warnings)
     assert not hasattr(config, "config_cmds_enabled")
+
+
+def test_valid_host_names_are_accepted():
+    for host in ("127.0.0.1", "localhost", "::1", "münchen.example", "mock.local"):
+        assert ProfibusConfig(mock_host=host).mock_host == host

@@ -167,6 +167,46 @@ def test_deadline_covers_every_attempt_and_backoff():
     assert backend.status()["deadline_s"] == pytest.approx(2.8)
 
 
+async def test_a_host_name_that_cannot_be_encoded_means_nothing_was_sent():
+    # Passes the startup check (stdlib IDNA) but not anyio's stricter IDNA 2008
+    # encoding, so connect_tcp raises IDNAError, not OSError, before any send.
+    master = mock_master(free_port(), mock_host="\u2603.example", max_retries=0, writes_enabled=True)
+    with pytest.raises(ProfibusMasterError) as info:
+        await master.write_outputs(5, [1])
+    assert not isinstance(info.value, OutcomeUnknownError)
+    assert info.value.meta["outcome"] == "not_sent" and info.value.meta["request_sent"] is False
+    assert "may have been applied" not in str(info.value)
+
+
+@pytest.mark.parametrize("error", [UnicodeError("label too long"), ValueError("odd"), RuntimeError("boom")])
+async def test_any_error_while_connecting_means_not_sent(monkeypatch, error):
+    async def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(anyio, "connect_tcp", fail)
+    master = mock_master(free_port(), max_retries=1, writes_enabled=True)
+    with pytest.raises(ProfibusMasterError) as info:
+        await master.write_outputs(5, [1])
+    assert info.value.meta["outcome"] == "not_sent" and info.value.meta["request_sent"] is False
+    assert info.value.meta["attempts"] == 2  # nothing was sent, so connecting may be retried
+
+
+@pytest.mark.parametrize("sent", [False, True])
+async def test_unexpected_error_reports_whether_anything_was_sent(monkeypatch, sent):
+    async def broken(self, payload, state):
+        if sent:
+            state.mark_sent()
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(MockBackend, "_exchange", broken)
+    master = mock_master(free_port(), writes_enabled=True)
+    with pytest.raises(ProfibusMasterError, match="unexpected") as info:
+        await master.write_outputs(5, [1])
+    assert info.value.meta["request_sent"] is sent
+    assert info.value.meta["outcome"] == ("unknown" if sent else "not_sent")
+    assert isinstance(info.value, OutcomeUnknownError) is sent
+
+
 async def test_unreachable_mock_is_retried_then_reported():
     master = mock_master(free_port(), max_retries=2)
     with pytest.raises(ProfibusMasterError, match="Cannot reach the PROFIBUS mock slave") as info:

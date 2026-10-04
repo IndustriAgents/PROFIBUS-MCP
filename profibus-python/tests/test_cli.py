@@ -249,6 +249,14 @@ def test_unknown_port_url_scheme_is_a_configuration_error(no_project, monkeypatc
     assert "PROFIBUS_PORT" in capsys.readouterr().err
 
 
+def test_unencodable_mock_host_is_a_configuration_error(no_project, monkeypatch, capsys):
+    monkeypatch.setenv("PROFIBUS_MOCK_HOST", "münchen..example")
+    with pytest.raises(SystemExit) as info:
+        cli.main([])
+    assert info.value.code == 2
+    assert "PROFIBUS_MOCK_HOST" in capsys.readouterr().err
+
+
 def test_key_classification():
     for gate in ("PROFIBUS_WRITES_ENABLED", "profibus_writes_enabled", " Profibus_Config_Cmds_Enabled "):
         assert cli.is_safety_gate(gate) and not cli.is_own_setting(gate)

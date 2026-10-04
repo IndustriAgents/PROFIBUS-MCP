@@ -248,6 +248,8 @@ class MockBackend:
         try:
             with anyio.fail_after(deadline):
                 raw = await self._attempts(op, payload, meta, state, retry_after_send)
+        except ProfibusMasterError:
+            raise
         except TimeoutError:
             # Something hung beyond every per-attempt bound. Whether the
             # request went out cannot be known, so assume it did.
@@ -257,6 +259,12 @@ class MockBackend:
                 f"of {deadline:.1f} s",
                 meta,
             ) from None
+        except Exception as exc:
+            # Anything unexpected: the request may have left only if a send began.
+            meta["request_sent"] = state.ever_sent
+            raise ProfibusMasterError(
+                f"The request to the mock slave at {self.endpoint} failed: {type(exc).__name__}: {exc}", meta
+            ) from exc
 
         meta["request_sent"] = True
         try:
@@ -298,7 +306,9 @@ class MockBackend:
             with anyio.fail_after(self.config.timeout_s):
                 try:
                     stream = await anyio.connect_tcp(self.host, self.port)
-                except OSError as exc:
+                except Exception as exc:
+                    # Nothing has been sent yet, whatever went wrong: OSError,
+                    # or e.g. an IDNA error for a host name that cannot be encoded.
                     raise _TransportError(
                         f"Cannot reach the PROFIBUS mock slave at {self.endpoint} ({exc}). Start it with "
                         "`uv run profibus-mock-slave` or check PROFIBUS_MOCK_HOST / PROFIBUS_MOCK_PORT.",

@@ -74,6 +74,11 @@ class ProfibusConfig:
             )
         if not self.mock_host.strip():
             raise ConfigError("PROFIBUS_MOCK_HOST must not be empty")
+        if not self.mock_host.isascii():
+            try:
+                self.mock_host.encode("idna")
+            except UnicodeError as exc:
+                raise ConfigError(f"PROFIBUS_MOCK_HOST {self.mock_host!r} is not a valid host name: {exc}") from None
         if not 1 <= self.mock_port <= 65535:
             raise ConfigError(f"PROFIBUS_MOCK_PORT must be between 1 and 65535, got {self.mock_port}")
 
