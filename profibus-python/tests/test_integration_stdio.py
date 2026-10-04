@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,6 @@ import anyio
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-import profibus_mcp
 
 from .conftest import MOCK_DIR, MOCK_GSD_DIR
 from .fakes import free_port
@@ -154,7 +153,7 @@ async def test_every_tool_end_to_end_with_writes_disabled(mock_port: int, tmp_pa
 
     async with mcp_session(env, tmp_path) as (session, init):
         assert init.serverInfo.name == "PROFIBUS MCP Server"
-        assert init.serverInfo.version == profibus_mcp.__version__
+        assert init.serverInfo.version == version("profibus-mcp")
         tools = (await session.list_tools()).tools
         assert {tool.name for tool in tools} == TOOLS
         assert all(tool.description for tool in tools)
@@ -203,8 +202,10 @@ async def test_every_tool_end_to_end_with_writes_disabled(mock_port: int, tmp_pa
 
         refused = await call(session, "write_outputs", {"slave_address": 5, "data": [1, 2]})
         assert refused["success"] is False and "PROFIBUS_WRITES_ENABLED=true" in refused["error"]
+        assert refused["meta"]["outcome"] == "not_sent" and refused["meta"]["request_sent"] is False
         refused = await call(session, "write_slave_by_alias", {"alias": "drive1", "data": [1]})
         assert refused["success"] is False and "Writes are disabled" in refused["error"]
+        assert refused["meta"]["outcome"] == "not_sent"
 
         bad = await call(session, "read_inputs", {"slave_address": "abc"})
         assert bad["success"] is False and bad["error"].startswith("Invalid arguments: slave_address")
@@ -225,15 +226,33 @@ async def test_writes_reach_the_mock_when_enabled(mock_port: int, tmp_path: Path
         written = await call(session, "write_outputs", {"slave_address": 5, "data": [0x12, 0x34]})
         assert written["success"] is True and written["data"]["written_bytes"] == 2
         assert written["meta"]["backend"] == "mock" and written["meta"]["attempts"] == 1
+        assert written["meta"]["outcome"] == "written" and written["meta"]["request_sent"] is True
         assert mock_request(mock_port, {"op": "read_outputs", "address": 5})["data"]["raw_data_hex"] == "1234"
 
         too_many = await call(session, "write_outputs", {"slave_address": 5, "data": [1, 2, 3]})
         assert too_many["success"] is False and "2 output bytes" in too_many["error"]
+        assert too_many["meta"]["outcome"] == "rejected" and too_many["meta"]["request_sent"] is True
         assert mock_request(mock_port, {"op": "read_outputs", "address": 5})["data"]["raw_data_hex"] == "1234"
 
         by_alias = await call(session, "write_slave_by_alias", {"alias": "valve_island", "data": [9, 8, 7, 6]})
         assert by_alias["success"] is True
         assert mock_request(mock_port, {"op": "read_outputs", "address": 8})["data"]["raw_data_hex"] == "09080706"
+
+
+@pytest.mark.anyio
+async def test_implicit_env_file_cannot_enable_writes(mock_port: int, tmp_path: Path) -> None:
+    # A client may start the server in an untrusted project directory; a .env
+    # there may point at the mock but must not switch writes on.
+    (tmp_path / ".env").write_text(
+        f"PROFIBUS_BACKEND=mock\nPROFIBUS_MOCK_PORT={mock_port}\nPROFIBUS_WRITES_ENABLED=true\n", encoding="utf-8"
+    )
+    before = mock_request(mock_port, {"op": "read_outputs", "address": 8})["data"]["raw_data_hex"]
+    async with mcp_session({}, tmp_path) as (session, _):
+        ping = await call(session, "ping")
+        assert ping["data"]["backend"] == "mock" and ping["data"]["writes_enabled"] is False
+        refused = await call(session, "write_outputs", {"slave_address": 8, "data": [1, 2, 3, 4]})
+        assert refused["success"] is False and refused["meta"]["outcome"] == "not_sent"
+    assert mock_request(mock_port, {"op": "read_outputs", "address": 8})["data"]["raw_data_hex"] == before
 
 
 @pytest.mark.anyio
@@ -271,9 +290,18 @@ def _server_env(**extra: str) -> dict[str, str]:
     return env
 
 
-def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path) -> None:
-    # Legacy and ignored variables make the server log warnings: they must go to stderr.
-    env = _server_env(PROFIBUS_MOCK="true", PROFIBUS_CONFIG_CMDS_ENABLED="true", PROFIBUS_MOCK_PORT=str(mock_port))
+def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map: Path) -> None:
+    """Every tool is called on an unbuffered server; any stray print() would break a stdout line."""
+    (tmp_path / ".env").write_text("PROFIBUS_WRITES_ENABLED=true\n", encoding="utf-8")  # ignored, with a warning
+    env = _server_env(
+        PYTHONUNBUFFERED="1",  # without this a stray print() sits in the buffer and is lost at exit
+        PROFIBUS_MOCK="true",  # deprecated alias: logs a warning
+        PROFIBUS_CONFIG_CMDS_ENABLED="true",  # ignored setting: logs a warning
+        PROFIBUS_MOCK_PORT=str(mock_port),
+        PROFIBUS_WRITES_ENABLED="true",
+        SLAVE_MAP_FILE=str(slave_map),
+        PROFIBUS_GSD_PATH=str(MOCK_GSD_DIR),
+    )
     process = subprocess.Popen(
         SERVER_CMD,
         stdin=subprocess.PIPE,
@@ -286,6 +314,7 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path) -> None:
     threading.Thread(target=lambda: [lines.put(line) for line in process.stdout], daemon=True).start()
     stderr_chunks: list[bytes] = []
     threading.Thread(target=lambda: stderr_chunks.extend(process.stderr), daemon=True).start()
+    stdout_lines: list[bytes] = []
 
     def send(message: dict[str, Any]) -> None:
         process.stdin.write(json.dumps(message).encode() + b"\n")
@@ -294,11 +323,27 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path) -> None:
     def response(request_id: int) -> dict[str, Any]:
         while True:
             line = lines.get(timeout=30)
-            message = json.loads(line)  # every stdout line must be JSON
+            stdout_lines.append(line)
+            message = json.loads(line)  # every stdout line must be JSON-RPC
             assert message.get("jsonrpc") == "2.0", line
             if message.get("id") == request_id:
                 return message
 
+    calls = [
+        ("scan_bus", {}),
+        ("read_inputs", {"slave_address": 5}),
+        ("read_inputs", {"slave_address": [1]}),  # invalid: still an envelope
+        ("write_outputs", {"slave_address": 5, "data": [7]}),
+        ("read_diagnosis", {"slave_address": 8}),
+        ("test_slave_communication", {"slave_address": 9}),
+        ("list_slaves", {}),
+        ("read_slave_by_alias", {"alias": "drive1"}),
+        ("write_slave_by_alias", {"alias": "valve_island", "data": [1]}),
+        ("load_gsd_file", {"filepath": "IA_809C.gsd"}),
+        ("load_gsd_file", {"filepath": "missing.gsd"}),
+        ("ping", {}),
+        ("get_master_status", {}),
+    ]
     try:
         send(
             {
@@ -312,22 +357,24 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path) -> None:
                 },
             }
         )
-        assert response(1)["result"]["serverInfo"]["version"] == profibus_mcp.__version__
+        assert response(1)["result"]["serverInfo"]["version"] == version("profibus-mcp")
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        assert len(response(2)["result"]["tools"]) == len(TOOLS)
-        send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "scan_bus", "arguments": {}}})
-        scan = json.loads(response(3)["result"]["content"][0]["text"])
-        assert scan["success"] is True and scan["meta"]["backend"] == "mock"
-        send(
-            {
-                "jsonrpc": "2.0",
-                "id": 4,
-                "method": "tools/call",
-                "params": {"name": "read_inputs", "arguments": {"slave_address": [1]}},
-            }
-        )
-        assert json.loads(response(4)["result"]["content"][0]["text"])["success"] is False
+        assert {tool["name"] for tool in response(2)["result"]["tools"]} == TOOLS
+        for request_id, (name, arguments) in enumerate(calls, start=3):
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                }
+            )
+            result = response(request_id)["result"]
+            assert not result.get("isError"), (name, result)
+            envelope = json.loads(result["content"][0]["text"])
+            assert set(envelope) == {"success", "data", "error", "meta"}, (name, envelope)
+        assert {name for name, _ in calls} == TOOLS
     finally:
         process.stdin.close()
         try:
@@ -336,12 +383,15 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path) -> None:
             process.kill()
             process.wait(timeout=5)
 
-    time.sleep(0.1)
+    time.sleep(0.2)
     while not lines.empty():
         line = lines.get()
+        stdout_lines.append(line)
         assert json.loads(line).get("jsonrpc") == "2.0", line
+    assert len(stdout_lines) >= len(calls) + 2
     stderr = b"".join(stderr_chunks).decode()
     assert "deprecated" in stderr and "PROFIBUS_CONFIG_CMDS_ENABLED is ignored" in stderr
+    assert "PROFIBUS_WRITES_ENABLED in " in stderr  # the .env gate was ignored, loudly
 
 
 def test_configuration_error_is_reported_on_stderr_without_traceback(tmp_path: Path) -> None:
