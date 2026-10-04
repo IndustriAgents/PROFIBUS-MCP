@@ -26,13 +26,22 @@ application on the office network.
   language model will call a tool it has been given.
 - **The switch never comes from an implicit `.env`.** A server started by an
   MCP client may run in the client's project directory, which may not be
-  trusted. The `.env` the server finds there may set connection settings, but
-  `PROFIBUS_WRITES_ENABLED` (any `PROFIBUS_*_ENABLED`) in it is ignored with a
-  warning on stderr. Enable writes in the process environment (the client's
-  `env` block) or in a file you pass with `--env-file`.
+  trusted, and settings such as the mock endpoint or the slave map decide
+  where a write goes. So the server never reads a `.env` from its working
+  directory or a parent. The only implicit file is `profibus-python/.env` of a
+  source checkout (an installed package reads none), and from it only
+  `PROFIBUS_*` settings and `SLAVE_MAP_FILE` are applied. Safety switches
+  (`PROFIBUS_WRITES_ENABLED` and any `PROFIBUS_*_ENABLED`, in any letter case
+  or with `export`) and all other variables (`LD_PRELOAD`, `PYTHONPATH`, ...)
+  are ignored with a warning on stderr. Enable writes in the process
+  environment (the client's `env` block) or in a file you pass with
+  `--env-file`.
 - **Treat an `unknown` write as possibly applied.** A write whose request went
-  out but whose reply was lost reports `meta.outcome: "unknown"`. The server
-  never re-sends it; check the outputs before trying again.
+  out but whose reply was lost, garbled or not an explicit refusal reports
+  `meta.outcome: "unknown"`. The server never re-sends it, and the write tools
+  are annotated as not idempotent so clients do not retry them either; check
+  the outputs before trying again. Every request has an overall deadline, so a
+  call cannot hang without an outcome.
 - **Confine `load_gsd_file`.** Without `PROFIBUS_GSD_PATH`, `load_gsd_file`
   opens any file the server's account can read. It returns only parsed GSD
   content and its errors do not echo file contents, but whether it says "not

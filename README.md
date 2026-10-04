@@ -32,12 +32,17 @@ is always a `success: false` envelope.
 Writes are **off by default**. `write_outputs` and `write_slave_by_alias`
 refuse every call unless `PROFIBUS_WRITES_ENABLED=true` is set in the process
 environment (for example the MCP client's `env` block) or in a file passed with
-`--env-file`. A `.env` file found in the working directory may set connection
-settings but cannot enable writes; the server ignores the switch there and logs
-a warning. Every write reports `meta.outcome`: `written`, `rejected`,
-`not_sent`, or `unknown` when the request went out but no reply confirmed it.
-An `unknown` write may have been applied, and it is never re-sent
-automatically. See [SECURITY.md](SECURITY.md).
+`--env-file`. The only `.env` the server reads by itself is
+`profibus-python/.env` in a source checkout (never the working directory or a
+parent; none when the package is installed). That file may set this server's
+own connection settings but cannot enable writes: the switch and any other
+variable there are ignored with a warning. Every write reports
+`meta.outcome`: `written`, `rejected` (the slave refused it before changing
+anything), `not_sent`, or `unknown` when the request went out but no valid
+reply confirmed it. An `unknown` write may have been applied, and it is never
+re-sent automatically. Every request to the mock has an overall deadline, so no
+call hangs without an outcome. Write tools are annotated as destructive and
+not idempotent. See [SECURITY.md](SECURITY.md).
 
 `load_gsd_file` parses real PROFIBUS DP GSD files (the ASCII keyword format:
 `#Profibus_DP`, `Keyword = value`, `Module ... EndModule`) and decodes each
@@ -68,7 +73,9 @@ module's I/O lengths from its configuration bytes. It needs no backend. With
 - Tools for bus scanning, cyclic I/O and diagnostics (`scan_bus`,
   `read_inputs`, `write_outputs`, `read_diagnosis`, `test_slave_communication`)
 - Read-only by default; writes need `PROFIBUS_WRITES_ENABLED=true` from the
-  environment or `--env-file`, never from an implicit `.env`
+  environment or `--env-file`, never from an implicit `.env`; an implicit
+  `.env` is read only from `profibus-python/` and only for this server's own
+  settings
 - GSD keyword-file parser behind `load_gsd_file`, with DP configuration-byte
   decoding
 - Alias-based slave map (`SLAVE_MAP_FILE`)

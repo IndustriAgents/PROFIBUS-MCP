@@ -37,17 +37,17 @@ start the mock and run the server under the MCP Inspector.
 ## Configuration
 
 Settings are environment variables, for example in your MCP client's `env`
-block. They are read once at startup, after `.env` is loaded; an unusable value
+block. They are read once at startup, after the `.env` file (see below) is loaded; an unusable value
 (say `PROFIBUS_BAUDRATE=fast`) stops the server with a one-line error on stderr
 and exit code 2.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PROFIBUS_BACKEND` | `serial` | `mock`: talk to `profibus-mock-slave`. `serial`: DP master on an RS-485 adapter (not implemented; bus tools return `success: false`) |
-| `PROFIBUS_WRITES_ENABLED` | `false` | `true` lets `write_outputs` and `write_slave_by_alias` change outputs; otherwise they refuse every call. Read only from the process environment or `--env-file`, never from an implicit `./.env` (see below) |
+| `PROFIBUS_WRITES_ENABLED` | `false` | `true` lets `write_outputs` and `write_slave_by_alias` change outputs; otherwise they refuse every call. Read only from the process environment or `--env-file`, never from the implicit `.env` (see below) |
 | `PROFIBUS_MOCK_HOST` | `127.0.0.1` | Host of the mock slave (`mock` backend) |
 | `PROFIBUS_MOCK_PORT` | `7100` | TCP port of the mock slave (`mock` backend) |
-| `PROFIBUS_TIMEOUT` | `1000` | Timeout per request in milliseconds (connect, and wait for the reply) |
+| `PROFIBUS_TIMEOUT` | `1000` | Timeout per attempt in milliseconds (connect, send and wait for the reply). Each request also has an overall deadline: timeout × (retries + 1) + backoff delays + 1 s, reported as `deadline_s` by `get_master_status` |
 | `PROFIBUS_MAX_RETRIES` | `3` | Retries after a transport failure (0-10). Reads are retried on any transport failure; writes only when the connection could not be made, so a write is never sent twice |
 | `PROFIBUS_RETRY_BACKOFF_BASE` | `0.1` | Seconds before the first retry; doubles on each further retry |
 | `PROFIBUS_PORT` | `/dev/ttyUSB0` | Serial port of the adapter (`serial` backend). A device path or a `socket://`, `rfc2217://` or `loop://` URL, checked at startup; other pyserial URL schemes (`hwgrep://`, `spy://`, ...) are refused. The port is never opened |
@@ -66,32 +66,40 @@ Changed from the scaffold:
   warning is logged), so the mock slave has to be running.
 - `PROFIBUS_CONFIG_CMDS_ENABLED` is gone; no tool used it. Setting it logs a
   warning.
-- `PROFIBUS_WRITES_ENABLED=true` in `./.env` no longer enables writes; see
-  below.
+- `.env` is no longer read from the working directory; only
+  `profibus-python/.env`, and only for this server's own settings. See below.
 - With `PROFIBUS_GSD_PATH` set, `load_gsd_file` no longer opens paths outside
   it.
 
 ### `.env` and `--env-file`
 
-At startup the server loads `.env` from its **working directory** only, never
-from a parent directory. Variables already set in the environment win over the
-file. With `uv --directory /path/to/profibus-python run profibus-mcp` the
-working directory is `profibus-python/`, so that is where the file goes;
+The server reads one `.env` by itself: **`profibus-python/.env` of a source
+checkout**, found relative to the package source. It never reads a `.env` from
+the working directory or any parent directory, and an installed package (in
+site-packages) reads none at all. A server started by an MCP client may run in
+the client's project directory, which may not be trusted, and settings such as
+the mock endpoint or the slave map decide where a write goes.
 [`.env.example`](.env.example) lists every setting.
 
-An automatically found `.env` may set connection settings, but **not** a
-safety switch: `PROFIBUS_WRITES_ENABLED` (and any other `PROFIBUS_*_ENABLED`)
-in it is ignored, with a warning on stderr naming the variable. A server
-started by an MCP client may run in the client's project directory, which may
-not be trusted. Set the switch in the process environment (the MCP client's
-`env` block), or put it in a file you name explicitly:
+From that file, only this server's own settings are applied: `PROFIBUS_*`
+variables and `SLAVE_MAP_FILE`. Names are compared upper-cased (as Windows
+does), so `profibus_backend=mock` and `export PROFIBUS_BACKEND=mock` work.
+Everything else is ignored with a warning on stderr naming the variable:
+
+- safety switches such as `PROFIBUS_WRITES_ENABLED`, in any spelling
+  (`profibus_writes_enabled`, `export Profibus_Writes_Enabled=...`);
+- variables of other programs (`PATH`, `LD_PRELOAD`, `PYTHONPATH`, ...).
+
+Variables already set in the environment win over the file. Enable writes in
+the process environment (the MCP client's `env` block), or in a file you name
+explicitly:
 
 ```bash
 uv run profibus-mcp --env-file /path/to/bench.env
 ```
 
-`--env-file` replaces `./.env` (only the named file is read) and may set every
-variable. `profibus-mcp --version` prints the version.
+`--env-file` replaces `profibus-python/.env` (only the named file is read) and
+may set every variable. `profibus-mcp --version` prints the version.
 
 ## Responses
 
@@ -107,9 +115,9 @@ Write tools also report `meta.outcome` and `meta.request_sent`:
 | `outcome` | Meaning |
 |-----------|---------|
 | `written` | The slave acknowledged every byte |
-| `rejected` | The slave answered and refused the write (for example too many bytes) |
+| `rejected` | The slave refused the write before changing anything (the mock says so with `"applied": false`; for example too many bytes) |
 | `not_sent` | Nothing left the server: writes disabled, invalid arguments, unknown alias, unreachable mock, or the serial backend |
-| `unknown` | The request was sent but no valid reply confirmed it. It may have been applied; check the slave's outputs before retrying |
+| `unknown` | The request was sent but no valid reply confirmed it (timeout, dropped connection, garbled reply, an error without a refusal, the overall deadline). It may have been applied; check the slave's outputs before retrying |
 
 A write is never sent twice: only a connection that could not be made is
 retried.

@@ -105,8 +105,10 @@ on. If you raise a floor or use a newer API, raise the floor too.
 The server's suite includes `tests/test_integration_stdio.py`, which starts the
 mock slave itself (with `uv run`, on a free port) and drives the real server
 over stdio with the MCP client SDK: every tool, the write gate, stdout carrying
-only JSON-RPC (unbuffered, so a stray `print()` fails it), a `.env` that tries
-to enable writes, and a clean exit on a bad setting. If you add or rename a tool,
+only JSON-RPC (unbuffered, so a stray `print()` fails it), the `.env` rules (on
+a copy of the source tree, so your own `profibus-python/.env` is never touched
+or read), and a clean exit on a bad setting. The mock it starts watches a stdin
+pipe (`--exit-on-stdin-eof`), so even a killed test run leaves no mock behind. If you add or rename a tool,
 update the expected tool set there and in `tests/test_tools.py`. `ruff format .`
 fixes formatting.
 
@@ -140,9 +142,12 @@ you used.
   bad arguments.
 - Read configuration in `ProfibusConfig.from_env()`, never at import time, so
   `.env` reaches every setting. A new safety switch must be named
-  `PROFIBUS_*_ENABLED` so an implicit `.env` cannot set it.
+  `PROFIBUS_*_ENABLED` so the implicit `profibus-python/.env` cannot set it.
 - A write is sent at most once. Only a connection that was never made may be
-  retried, and every write reports `meta.outcome`.
+  retried, and every write reports `meta.outcome`. `rejected` is only for a
+  refusal that guarantees nothing changed; anything else after the send is
+  `unknown`. Every device request has an overall deadline.
+- Write tools are annotated `destructiveHint=True`, `idempotentHint=False`.
 - Tool arguments for addresses, lengths and byte values are strict integers.
 - Every tool has a docstring: it is the description the model sees.
 - Keep tool names and argument names aligned with the other IndustriConnect
