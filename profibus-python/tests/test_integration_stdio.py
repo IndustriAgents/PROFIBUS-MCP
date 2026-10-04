@@ -1,7 +1,12 @@
 """End to end: the real server over stdio (MCP client SDK) against the real mock slave.
 
 The mock is started from ../profibus-mock-slave with ``uv run``, in its own
-locked environment, on a free local port.
+locked environment, on a free local port, with a stdin pipe it watches: if
+the test run is killed, the pipe closes and the mock exits.
+
+Servers are started with an explicit, empty ``--env-file`` so a developer's
+own profibus-python/.env never takes part; the .env rules have their own test
+on a copy of the source tree.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .conftest import MOCK_DIR, MOCK_GSD_DIR
+from .conftest import MOCK_DIR, MOCK_GSD_DIR, TESTS_DIR
 from .fakes import free_port
 
 TOOLS = {
@@ -43,7 +48,33 @@ TOOLS = {
     "get_master_status",
     "test_slave_communication",
 }
-SERVER_CMD = [sys.executable, "-m", "profibus_mcp.cli"]
+SERVER_MODULE = [sys.executable, "-m", "profibus_mcp.cli"]
+
+
+def server_cmd(directory: Path) -> list[str]:
+    """The server command, isolated from any implicit .env by an empty --env-file."""
+    isolated = directory / "isolated.env"
+    isolated.touch()
+    return [*SERVER_MODULE, "--env-file", str(isolated)]
+
+
+def mock_command(uv: str, port: int) -> list[str]:
+    command = [uv, "run", "--locked", "--directory", str(MOCK_DIR), "profibus-mock-slave"]
+    return command + ["--host", "127.0.0.1", "--port", str(port), "--update-interval", "0.05", "--exit-on-stdin-eof"]
+
+
+def _uv() -> str:
+    uv = shutil.which("uv")
+    if uv is None:
+        if os.environ.get("CI"):
+            pytest.fail("uv is needed to start profibus-mock-slave")
+        pytest.skip("uv is needed to start profibus-mock-slave")
+    return uv
+
+
+def _mock_env() -> dict[str, str]:
+    # Our own virtualenv must not leak into the mock's `uv run`.
+    return {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
 
 
 # ---------------------------------------------------------------------------
@@ -53,19 +84,19 @@ SERVER_CMD = [sys.executable, "-m", "profibus_mcp.cli"]
 
 @pytest.fixture(scope="module")
 def mock_port(tmp_path_factory: pytest.TempPathFactory) -> Iterator[int]:
-    uv = shutil.which("uv")
-    if uv is None:
-        if os.environ.get("CI"):
-            pytest.fail("uv is needed to start profibus-mock-slave")
-        pytest.skip("uv is needed to start profibus-mock-slave")
+    uv = _uv()
     port = free_port()
     log_path = tmp_path_factory.mktemp("mock") / "mock.log"
-    # Our own virtualenv must not leak into the mock's `uv run`.
-    env = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
-    command = [uv, "run", "--locked", "--directory", str(MOCK_DIR), "profibus-mock-slave"]
-    command += ["--host", "127.0.0.1", "--port", str(port), "--update-interval", "0.05"]
     with log_path.open("wb") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        # The stdin pipe is the mock's lifeline: it closes when this process dies.
+        process = subprocess.Popen(
+            mock_command(uv, port),
+            stdin=subprocess.PIPE,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=_mock_env(),
+            start_new_session=True,
+        )
     try:
         _wait_for_port(port, process, log_path)
         yield port
@@ -88,6 +119,12 @@ def _wait_for_port(port: int, process: subprocess.Popen, log_path: Path) -> None
 
 
 def _stop(process: subprocess.Popen) -> None:
+    if process.stdin:
+        process.stdin.close()  # the mock exits on EOF
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
     if process.poll() is not None:
         return
     try:
@@ -114,9 +151,12 @@ def mock_request(port: int, request: dict[str, Any]) -> dict[str, Any]:
 
 
 @asynccontextmanager
-async def mcp_session(env: dict[str, str], cwd: Path) -> AsyncIterator[tuple[ClientSession, Any]]:
-    params = StdioServerParameters(command=SERVER_CMD[0], args=SERVER_CMD[1:], env=env, cwd=str(cwd))
-    async with stdio_client(params) as (read, write):
+async def mcp_session(
+    env: dict[str, str], cwd: Path, command: list[str] | None = None, errlog: Any = None
+) -> AsyncIterator[tuple[ClientSession, Any]]:
+    command = command or server_cmd(cwd)
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env, cwd=str(cwd))
+    async with stdio_client(params, errlog=errlog or sys.stderr) as (read, write):
         async with ClientSession(read, write) as session:
             with anyio.fail_after(30):
                 init = await session.initialize()
@@ -240,19 +280,96 @@ async def test_writes_reach_the_mock_when_enabled(mock_port: int, tmp_path: Path
 
 
 @pytest.mark.anyio
-async def test_implicit_env_file_cannot_enable_writes(mock_port: int, tmp_path: Path) -> None:
-    # A client may start the server in an untrusted project directory; a .env
-    # there may point at the mock but must not switch writes on.
-    (tmp_path / ".env").write_text(
-        f"PROFIBUS_BACKEND=mock\nPROFIBUS_MOCK_PORT={mock_port}\nPROFIBUS_WRITES_ENABLED=true\n", encoding="utf-8"
+async def test_env_file_rules_over_stdio(mock_port: int, tmp_path: Path) -> None:
+    """Only profibus-python/.env is read, and from it only this server's non-gate settings.
+
+    Runs a copy of the source tree, so the developer's real profibus-python/.env is untouched.
+    """
+    project = tmp_path / "checkout" / "profibus-python"
+    shutil.copytree(
+        Path(profibus_mcp_source()),
+        project / "src" / "profibus_mcp",
+        ignore=shutil.ignore_patterns("__pycache__"),
     )
+    shutil.copy(TESTS_DIR.parent / "pyproject.toml", project / "pyproject.toml")
+    (project / ".env").write_text(
+        f"PROFIBUS_BACKEND=mock\nprofibus_mock_port={mock_port}\n"
+        "profibus_writes_enabled=true\nexport Profibus_Writes_Enabled='yes'\n"
+        "PYTHONSTARTUP=/nonexistent/startup.py\nFOO_UNRELATED=1\n",
+        encoding="utf-8",
+    )
+    # The client's (untrusted) project: neither its .env nor its parent's is read.
+    work = tmp_path / "client-project" / "sub"
+    work.mkdir(parents=True)
+    (work / ".env").write_text("PROFIBUS_MOCK_PORT=1\nPROFIBUS_WRITES_ENABLED=true\n", encoding="utf-8")
+    (work.parent / ".env").write_text("PROFIBUS_MOCK_HOST=192.0.2.1\n", encoding="utf-8")
+
     before = mock_request(mock_port, {"op": "read_outputs", "address": 8})["data"]["raw_data_hex"]
-    async with mcp_session({}, tmp_path) as (session, _):
-        ping = await call(session, "ping")
-        assert ping["data"]["backend"] == "mock" and ping["data"]["writes_enabled"] is False
-        refused = await call(session, "write_outputs", {"slave_address": 8, "data": [1, 2, 3, 4]})
-        assert refused["success"] is False and refused["meta"]["outcome"] == "not_sent"
+    stderr_path = tmp_path / "server.stderr"
+    with stderr_path.open("w") as errlog:
+        env = {"PYTHONPATH": str(project / "src")}
+        async with mcp_session(env, work, SERVER_MODULE, errlog) as (session, _):
+            ping = await call(session, "ping")
+            assert ping["data"]["backend"] == "mock" and ping["data"]["writes_enabled"] is False
+            scan = await call(session, "scan_bus")  # reaches the mock on the project's port, not the cwd's
+            assert scan["success"] is True and scan["meta"]["endpoint"] == f"127.0.0.1:{mock_port}"
+            refused = await call(session, "write_outputs", {"slave_address": 8, "data": [1, 2, 3, 4]})
+            assert refused["success"] is False and refused["meta"]["outcome"] == "not_sent"
     assert mock_request(mock_port, {"op": "read_outputs", "address": 8})["data"]["raw_data_hex"] == before
+    stderr = stderr_path.read_text()
+    assert f"loaded {project / '.env'}" in stderr
+    for name in ("profibus_writes_enabled", "Profibus_Writes_Enabled", "PYTHONSTARTUP", "FOO_UNRELATED"):
+        assert f"{name} in " in stderr, name
+
+
+def profibus_mcp_source() -> str:
+    import profibus_mcp
+
+    return os.path.dirname(profibus_mcp.__file__)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses SIGKILL")
+def test_mock_started_by_the_tests_dies_with_its_parent(tmp_path: Path) -> None:
+    """A killed test run (SIGKILL, no cleanup) must not leave the mock running."""
+    port = free_port()
+    parent_script = (
+        "import subprocess, sys, json\n"
+        "child = subprocess.Popen(json.loads(sys.argv[1]), stdin=subprocess.PIPE,"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)\n"
+        "print(child.pid, flush=True)\n"
+        "import time; time.sleep(600)\n"
+    )
+    command = json.dumps(mock_command(_uv(), port))
+    parent = subprocess.Popen([sys.executable, "-c", parent_script, command], stdout=subprocess.PIPE, env=_mock_env())
+    child_pid = int(parent.stdout.readline())
+    try:
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "the mock never started listening"
+                time.sleep(0.2)
+        parent.send_signal(signal.SIGKILL)
+        parent.wait(timeout=10)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            except OSError:
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("the mock kept listening after its parent was killed")
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+        try:
+            os.killpg(child_pid, signal.SIGKILL)  # only if something survived
+        except ProcessLookupError:
+            pass
 
 
 @pytest.mark.anyio
@@ -292,7 +409,6 @@ def _server_env(**extra: str) -> dict[str, str]:
 
 def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map: Path) -> None:
     """Every tool is called on an unbuffered server; any stray print() would break a stdout line."""
-    (tmp_path / ".env").write_text("PROFIBUS_WRITES_ENABLED=true\n", encoding="utf-8")  # ignored, with a warning
     env = _server_env(
         PYTHONUNBUFFERED="1",  # without this a stray print() sits in the buffer and is lost at exit
         PROFIBUS_MOCK="true",  # deprecated alias: logs a warning
@@ -303,7 +419,7 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map:
         PROFIBUS_GSD_PATH=str(MOCK_GSD_DIR),
     )
     process = subprocess.Popen(
-        SERVER_CMD,
+        server_cmd(tmp_path),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -391,12 +507,11 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map:
     assert len(stdout_lines) >= len(calls) + 2
     stderr = b"".join(stderr_chunks).decode()
     assert "deprecated" in stderr and "PROFIBUS_CONFIG_CMDS_ENABLED is ignored" in stderr
-    assert "PROFIBUS_WRITES_ENABLED in " in stderr  # the .env gate was ignored, loudly
 
 
 def test_configuration_error_is_reported_on_stderr_without_traceback(tmp_path: Path) -> None:
     result = subprocess.run(
-        SERVER_CMD,
+        server_cmd(tmp_path),
         env=_server_env(PROFIBUS_BAUDRATE="fast"),
         cwd=tmp_path,
         stdin=subprocess.DEVNULL,
