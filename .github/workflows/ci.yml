@@ -46,6 +46,16 @@ jobs:
       - name: Tests
         run: uv run --no-sync pytest -v
 
+      # Every floor in pyproject.toml must be one the tests pass on: install
+      # the lowest allowed version of each direct dependency into a separate
+      # environment and run the whole suite again.
+      - name: Tests with the lowest direct dependencies
+        run: |
+          uv venv --python 3.11 "$RUNNER_TEMP/lowest"
+          uv pip install --python "$RUNNER_TEMP/lowest" --resolution lowest-direct -e . --group dev
+          uv pip list --python "$RUNNER_TEMP/lowest"
+          "$RUNNER_TEMP/lowest/bin/python" -m pytest -q
+
   mock:
     name: Mock slave (profibus-mock-slave)
     runs-on: ubuntu-latest
@@ -71,6 +81,13 @@ jobs:
 
       - name: Tests
         run: uv run --no-sync pytest -v
+
+      - name: Tests with the lowest direct dependencies
+        run: |
+          uv venv --python 3.11 "$RUNNER_TEMP/lowest"
+          uv pip install --python "$RUNNER_TEMP/lowest" --resolution lowest-direct -e . --group dev
+          uv pip list --python "$RUNNER_TEMP/lowest"
+          "$RUNNER_TEMP/lowest/bin/python" -m pytest -q
 
       - name: Console entry point
         run: uv run --no-sync profibus-mock-slave --help
