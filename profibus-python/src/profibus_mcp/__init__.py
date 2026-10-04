@@ -1,5 +1,12 @@
-"""PROFIBUS MCP server package."""
+"""PROFIBUS DP MCP server package."""
 
-from .server import ProfibusMCPServer
+from importlib.metadata import PackageNotFoundError, version
 
-__all__ = ["ProfibusMCPServer"]
+try:
+    __version__ = version("profibus-mcp")
+except PackageNotFoundError:  # pragma: no cover - running from a bare source tree
+    __version__ = "0.0.0+unknown"
+
+from .server import ProfibusMCPServer  # noqa: E402
+
+__all__ = ["ProfibusMCPServer", "__version__"]
