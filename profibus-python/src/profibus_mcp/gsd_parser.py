@@ -19,10 +19,11 @@ Indexed keywords such as ``Ext_User_Prm_Data_Ref(3)`` may legitimately repeat
 ``indexed_keywords``.
 
 When ``PROFIBUS_GSD_PATH`` is set, :class:`GSDParser` only opens files inside
-it (after resolving symlinks). The file is opened without following a final
-symlink and is then checked to be the very file the path still resolves to,
-so swapping a path component between the check and the open cannot make it
-read a file elsewhere.
+it (after resolving symlinks). The resolved path is then opened one component
+at a time with O_NOFOLLOW (O_DIRECTORY for directories), so no symlink is
+followed and nothing outside it, a device node for example, is ever opened,
+even if a component is swapped between the check and the open. The opened
+file must still be the one the path resolves to (same device and inode).
 """
 
 from __future__ import annotations
@@ -36,8 +37,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-#: Open flags: no final symlink, no blocking on a FIFO swapped in.
-_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NOCTTY = getattr(os, "O_NOCTTY", 0)
+#: The file itself: no symlink, no blocking on a FIFO, never a controlling tty.
+_OPEN_FLAGS = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | _NOCTTY | getattr(os, "O_BINARY", 0)
+#: Each directory on the way: no symlink, and it must be a directory.
+_DIR_FLAGS = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_DIRECTORY", 0) | _NOCTTY
+#: Opening relative to a directory descriptor needs dir_fd support (not on Windows).
+_CAN_WALK = os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and _NOFOLLOW != 0
+#: errno values for "a symlink (or non-directory) where none is allowed".
+_SWAPPED = {errno.ELOOP, errno.ENOTDIR, errno.EMLINK}
 
 #: Refuse files above this size; real GSD files are far smaller.
 MAX_GSD_BYTES = 4 * 1024 * 1024
@@ -279,9 +288,9 @@ class GSDParser:
         """Return ``(parsed, from_cache)``. The cache is keyed on device, inode, mtime and size."""
         path = self.resolve(filepath)
         try:
-            fd = os.open(path, _OPEN_FLAGS)
+            fd = _open_without_symlinks(path)
         except OSError as exc:
-            if exc.errno == errno.ELOOP:  # the resolved path became a symlink
+            if exc.errno in _SWAPPED:  # part of the resolved path became a symlink
                 raise GSDParserError(f"{str(filepath)!r} changed while it was being opened; refused") from None
             raise GSDParserError(f"Cannot read GSD file {path}: {exc.strerror}") from None
         try:
@@ -325,6 +334,29 @@ class GSDParser:
             raise changed from None
         if again != path or (now.st_dev, now.st_ino) != (info.st_dev, info.st_ino):
             raise changed
+
+
+def _open_without_symlinks(path: Path) -> int:
+    """Open an absolute, already resolved path without following any symlink.
+
+    Each directory is opened relative to the previous one with O_NOFOLLOW and
+    O_DIRECTORY, then the file with O_NOFOLLOW. A component replaced by a
+    symlink fails with ELOOP/ENOTDIR instead of leading somewhere else. Where
+    dir_fd is unsupported (Windows), the whole path is opened at once and the
+    device/inode re-check in the caller is the guard.
+    """
+    if not _CAN_WALK:
+        return os.open(path, _OPEN_FLAGS)
+    parts = path.parts
+    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)  # the root itself
+    try:
+        for part in parts[1:-1]:
+            next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return os.open(parts[-1], _OPEN_FLAGS, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def _read_fd(fd: int, limit: int) -> bytes:

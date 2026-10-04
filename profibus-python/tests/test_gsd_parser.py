@@ -361,22 +361,38 @@ def test_unresolvable_paths_get_the_same_refusal(tmp_path, attempt):
         GSDParser().load(str(base / attempt) if attempt == "loop1.gsd" else attempt)
 
 
-@pytest.fixture
-def swapping_open(monkeypatch):
-    """Patch os.open so a path component is swapped just before the open and restored after."""
-    real_open = os.open
+class SwappingOpen:
+    """Patches os.open: swap a path component before each open, restore it after,
+    and record (device, inode) of everything that actually got opened."""
 
-    def install(swap, restore):
+    def __init__(self, monkeypatch):
+        self.monkeypatch = monkeypatch
+        self.opened: set[tuple[int, int]] = set()
+
+    def install(self, swap, restore):
+        real_open = os.open
+
         def patched(path, flags, *args, **kwargs):
             swap()
             try:
-                return real_open(path, flags, *args, **kwargs)
+                fd = real_open(path, flags, *args, **kwargs)
             finally:
                 restore()
+            info = os.fstat(fd)
+            self.opened.add((info.st_dev, info.st_ino))
+            return fd
 
-        monkeypatch.setattr(os, "open", patched)
+        self.monkeypatch.setattr(os, "open", patched)
 
-    return install
+
+@pytest.fixture
+def swapping_open(monkeypatch):
+    return SwappingOpen(monkeypatch)
+
+
+def _identity(path) -> tuple[int, int]:
+    info = os.stat(path)
+    return info.st_dev, info.st_ino
 
 
 def _secret_gsd(path):
@@ -400,9 +416,11 @@ def test_final_component_swapped_for_a_symlink_is_refused(tmp_path, swapping_ope
         target.unlink()
         aside.rename(target)
 
-    swapping_open(swap, restore)
+    swapping_open.install(swap, restore)
     with pytest.raises(GSDParserError, match="changed while it was being opened"):
         GSDParser(base).load("dev.gsd")
+    # Refusing afterwards is not enough: the outside file must never be opened.
+    assert _identity(outside) not in swapping_open.opened
 
 
 def test_parent_directory_swapped_for_a_symlink_is_refused(tmp_path, swapping_open):
@@ -422,9 +440,33 @@ def test_parent_directory_swapped_for_a_symlink_is_refused(tmp_path, swapping_op
         sub.unlink()
         aside.rename(sub)
 
-    swapping_open(swap, restore)
+    swapping_open.install(swap, restore)
     with pytest.raises(GSDParserError, match="changed while it was being opened"):
         GSDParser(base).load("sub/dev.gsd")
+    assert _identity(elsewhere) not in swapping_open.opened
+    assert _identity(elsewhere / "dev.gsd") not in swapping_open.opened
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/null"), reason="needs /dev/null")
+def test_a_directory_swapped_for_dev_never_opens_a_device(tmp_path, swapping_open):
+    base = tmp_path / "gsd"
+    (base / "sub").mkdir(parents=True)
+    (base / "sub" / "null").write_text(MINIMAL, encoding="ascii")  # looks fine when checked
+    sub, aside = base / "sub", base / "sub.orig"
+
+    def swap():
+        sub.rename(aside)
+        sub.symlink_to("/dev", target_is_directory=True)
+
+    def restore():
+        sub.unlink()
+        aside.rename(sub)
+
+    swapping_open.install(swap, restore)
+    with pytest.raises(GSDParserError, match="changed while it was being opened"):
+        GSDParser(base).load("sub/null")
+    assert _identity("/dev/null") not in swapping_open.opened
+    assert _identity("/dev") not in swapping_open.opened
 
 
 def test_a_fifo_is_not_read(tmp_path):
@@ -433,3 +475,30 @@ def test_a_fifo_is_not_read(tmp_path):
     os.mkfifo(base / "pipe.gsd")
     with pytest.raises(GSDParserError):
         GSDParser(base).load("pipe.gsd")
+
+
+def test_without_dir_fd_the_identity_recheck_refuses_a_swapped_parent(tmp_path, swapping_open, monkeypatch):
+    # Where os.open has no dir_fd (Windows) the path is opened in one go; the
+    # device/inode re-check is then what refuses a parent swapped mid-open.
+    from profibus_mcp import gsd_parser
+
+    monkeypatch.setattr(gsd_parser, "_CAN_WALK", False)
+    base = tmp_path / "gsd"
+    (base / "sub").mkdir(parents=True)
+    (base / "sub" / "dev.gsd").write_text(MINIMAL, encoding="ascii")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _secret_gsd(elsewhere / "dev.gsd")
+    sub, aside = base / "sub", base / "sub.orig"
+
+    def swap():
+        sub.rename(aside)
+        sub.symlink_to(elsewhere, target_is_directory=True)
+
+    def restore():
+        sub.unlink()
+        aside.rename(sub)
+
+    swapping_open.install(swap, restore)
+    with pytest.raises(GSDParserError, match="changed while it was being opened"):
+        GSDParser(base).load("sub/dev.gsd")

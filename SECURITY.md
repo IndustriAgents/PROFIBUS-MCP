@@ -47,7 +47,10 @@ application on the office network.
   content and its errors do not echo file contents, but whether it says "not
   found" or "not a GSD file" reveals whether a path exists. Set
   `PROFIBUS_GSD_PATH` to a directory of GSD files; then every other path is
-  refused before it is checked (symlinks are followed first).
+  refused before it is checked (symlinks are followed first). The file is
+  then opened one path component at a time without following any symlink,
+  so a component swapped in the meantime cannot make the server open
+  anything elsewhere, such as a device node.
 - **Do not expose the server beyond the host running the client.** It is a
   stdio process meant to run next to the MCP client, not a network service.
 - **Limit who can open the adapter.** Access to the serial device
