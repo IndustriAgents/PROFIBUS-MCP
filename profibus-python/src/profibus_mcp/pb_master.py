@@ -14,6 +14,10 @@ Two backends exist, selected by ``PROFIBUS_BACKEND``:
     connection; the reply is real data from the mock, never invented here.
 
 Every result and every error carries ``meta`` naming the backend that answered.
+Errors also say whether the request may have reached the slave
+(``meta.request_sent``), and write results carry ``meta.outcome``:
+``written``, ``rejected``, ``not_sent`` or ``unknown``. A write is never sent
+twice: only a connection that could not be made is retried.
 """
 
 from __future__ import annotations
@@ -34,6 +38,9 @@ log = logging.getLogger(__name__)
 
 #: DP-V0 limit for the input or output data of one slave, in bytes.
 MAX_DP_DATA_LEN = 244
+
+#: pyserial URL schemes accepted for PROFIBUS_PORT besides plain device paths.
+ALLOWED_PORT_SCHEMES = ("socket", "rfc2217", "loop")
 
 #: Upper bound for one reply line from the mock.
 MAX_REPLY_BYTES = 1024 * 1024
@@ -59,6 +66,14 @@ class WritesDisabledError(ProfibusMasterError):
 
 class BackendNotImplementedError(ProfibusMasterError):
     """The configured backend cannot perform bus operations."""
+
+
+class RequestRejectedError(ProfibusMasterError):
+    """The slave (or mock) answered and refused the request."""
+
+
+class OutcomeUnknownError(ProfibusMasterError):
+    """A write was sent but no valid reply confirmed it; it may have been applied."""
 
 
 class Backend(Protocol):
@@ -119,9 +134,18 @@ class SerialBackend:
 
     def __init__(self, config: ProfibusConfig) -> None:
         self.config = config
-        # serial_for_url accepts device paths as well as socket://, rfc2217://
-        # and loop:// URLs. do_not_open=True only checks the port spec and the
-        # character format (11-bit, even parity) without touching the device.
+        # Some pyserial URL handlers touch devices even with do_not_open=True
+        # (hwgrep:// test-opens every matching port), so only plain device
+        # paths and the URL schemes below are accepted.
+        if "://" in config.port:
+            scheme = config.port.split("://", 1)[0].lower()
+            if scheme not in ALLOWED_PORT_SCHEMES:
+                allowed = ", ".join(f"{name}://" for name in ALLOWED_PORT_SCHEMES)
+                raise ConfigError(
+                    f"PROFIBUS_PORT scheme {scheme}:// is not allowed; use a device path or one of {allowed}"
+                )
+        # serial_for_url understands both forms. do_not_open=True only checks
+        # the port spec and the character format (11-bit, even parity).
         try:
             serial.serial_for_url(
                 config.port,
@@ -144,8 +168,8 @@ class SerialBackend:
             "bus_communication": "not implemented",
         }
 
-    async def request(self, op: str, params: dict[str, Any], *, retry_after_send: bool) -> tuple[Any, Meta]:  # noqa: ARG002
-        meta: Meta = {"backend": self.name, "port": self.config.port, "implemented": False}
+    async def request(self, op: str, params: dict[str, Any], *, retry_after_send: bool) -> tuple[Any, Meta]:
+        meta: Meta = {"backend": self.name, "port": self.config.port, "implemented": False, "request_sent": False}
         raise BackendNotImplementedError(
             f"'{op}' is not implemented for PROFIBUS_BACKEND=serial: this server has no PROFIBUS DP master "
             f"stack yet, so nothing was sent and {self.config.port} was not opened. "
@@ -200,11 +224,13 @@ class MockBackend:
             except _TransportError as exc:
                 retryable = retry_after_send or not exc.sent
                 if attempt > self.config.max_retries or not retryable:
+                    meta["request_sent"] = exc.sent
                     raise ProfibusMasterError(str(exc), meta) from exc
                 delay = self.config.retry_backoff_base * (2 ** (attempt - 1))
                 log.debug("mock request %s failed (%s); retrying in %.3fs", op, exc, delay)
                 await anyio.sleep(delay)
 
+        meta["request_sent"] = True
         try:
             reply = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -214,7 +240,7 @@ class MockBackend:
         if not isinstance(reply, dict) or not isinstance(reply.get("success"), bool):
             raise ProfibusMasterError(f"The mock slave at {self.endpoint} sent an unexpected reply", meta)
         if not reply["success"]:
-            raise ProfibusMasterError(f"Mock slave: {reply.get('error') or 'request failed'}", meta)
+            raise RequestRejectedError(f"Mock slave: {reply.get('error') or 'request failed'}", meta)
         return reply.get("data"), meta
 
     async def _exchange(self, payload: bytes) -> bytes:
@@ -308,22 +334,39 @@ class ProfibusMaster:
         return payload, meta
 
     async def write_outputs(self, address: int, data: Sequence[int] | bytes) -> tuple[int, Meta]:
-        address = validate_slave_address(address)
-        payload = validate_output_data(data)
+        """Write output bytes once. Errors carry ``meta.outcome`` and ``meta.request_sent``."""
+        not_sent: Meta = {"backend": self.backend.name, "outcome": "not_sent", "request_sent": False}
+        try:
+            address = validate_slave_address(address)
+            payload = validate_output_data(data)
+        except InvalidArgumentError as exc:
+            exc.meta.update(not_sent)
+            raise
         if not self.config.writes_enabled:
             raise WritesDisabledError(
                 "Writes are disabled: set PROFIBUS_WRITES_ENABLED=true to allow them. Nothing was sent.",
-                {"backend": self.backend.name, "writes_enabled": False, "slave_address": address},
+                {**not_sent, "writes_enabled": False, "slave_address": address},
             )
-        reply, meta = await self._call(
-            "write_outputs", "write_outputs", {"address": address, "data": list(payload)}, retry_after_send=False
-        )
+        try:
+            reply, meta = await self._call(
+                "write_outputs", "write_outputs", {"address": address, "data": list(payload)}, retry_after_send=False
+            )
+        except RequestRejectedError as exc:
+            exc.meta.update(outcome="rejected", slave_address=address)
+            raise
+        except ProfibusMasterError as exc:
+            exc.meta["slave_address"] = address
+            if not exc.meta.get("request_sent"):
+                exc.meta["outcome"] = "not_sent"
+                raise
+            raise _outcome_unknown(str(exc), exc.meta) from exc
         meta["slave_address"] = address
         written = reply.get("written_bytes") if isinstance(reply, dict) else None
         if not _is_int(written):
-            raise ProfibusMasterError("The backend sent a malformed write_outputs reply", meta)
+            raise _outcome_unknown("The backend sent a malformed write_outputs reply.", meta)
         if written != len(payload):
-            raise ProfibusMasterError(f"Slave {address} accepted {written} of {len(payload)} output bytes", meta)
+            raise _outcome_unknown(f"Slave {address} reported {written} of {len(payload)} output bytes written.", meta)
+        meta["outcome"] = "written"
         return written, meta
 
     async def read_diagnosis(self, address: int) -> tuple[dict[str, Any], Meta]:
@@ -357,6 +400,15 @@ class ProfibusMaster:
             raise
         meta = {**meta, "operation": operation, "duration_ms": _elapsed_ms(start)}
         return data, meta
+
+
+def _outcome_unknown(message: str, meta: Meta) -> OutcomeUnknownError:
+    meta = {**meta, "outcome": "unknown", "request_sent": True}
+    return OutcomeUnknownError(
+        f"{message.rstrip('.')}. The write was sent and may have been applied; "
+        "check the slave's outputs before retrying.",
+        meta,
+    )
 
 
 def _elapsed_ms(start: float) -> float:

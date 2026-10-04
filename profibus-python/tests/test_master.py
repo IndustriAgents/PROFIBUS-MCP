@@ -10,8 +10,10 @@ from profibus_mcp.pb_master import (
     BackendNotImplementedError,
     InvalidArgumentError,
     MockBackend,
+    OutcomeUnknownError,
     ProfibusMaster,
     ProfibusMasterError,
+    RequestRejectedError,
     SerialBackend,
     WritesDisabledError,
 )
@@ -62,6 +64,7 @@ async def test_mock_backend_round_trip():
 
         written, meta = await master.write_outputs(5, [1, 255])
         assert written == 2 and meta["operation"] == "write_outputs"
+        assert meta["outcome"] == "written" and meta["request_sent"] is True
 
         diag, meta = await master.read_diagnosis(5)
         assert diag == {"slave_address": 5, "status": "OK", "ident_number": "0x809C"}
@@ -102,11 +105,34 @@ async def test_reads_are_retried_after_a_timeout_and_writes_are_not():
         assert info.value.meta["attempts"] == 2
         reads = len(received)
 
-        with pytest.raises(ProfibusMasterError, match="did not answer") as info:
+        with pytest.raises(OutcomeUnknownError, match="did not answer") as info:
             await master.write_outputs(5, [1])
         # The write reached the slave once; sending it again could repeat it.
         assert info.value.meta["attempts"] == 1
         assert len(received) == reads + 1
+        assert info.value.meta["outcome"] == "unknown" and info.value.meta["request_sent"] is True
+        assert "may have been applied" in str(info.value) and "before retrying" in str(info.value)
+
+
+@pytest.mark.parametrize("reply", [CLOSE, b"not json\n", {"data": []}, {"success": True, "data": {}}])
+async def test_write_without_a_valid_reply_is_unknown_and_not_resent(reply):
+    async def handler(request):
+        return reply
+
+    async with fake_mock_server(handler) as (port, received):
+        master = mock_master(port, max_retries=3, writes_enabled=True)
+        with pytest.raises(OutcomeUnknownError, match="may have been applied") as info:
+            await master.write_outputs(5, [1])
+    assert len(received) == 1
+    assert info.value.meta["outcome"] == "unknown" and info.value.meta["request_sent"] is True
+
+
+async def test_rejected_write_is_reported_as_rejected():
+    async with fake_mock_server(good_slave) as (port, received):
+        with pytest.raises(RequestRejectedError, match="Slave not found at address 9") as info:
+            await mock_master(port, writes_enabled=True).write_outputs(9, [1])
+    assert len(received) == 1
+    assert info.value.meta["outcome"] == "rejected" and info.value.meta["request_sent"] is True
 
 
 async def _hang():
@@ -118,6 +144,7 @@ async def test_write_is_retried_when_the_connection_was_never_made():
     with pytest.raises(ProfibusMasterError, match="Cannot reach") as info:
         await master.write_outputs(5, [1])
     assert info.value.meta["attempts"] == 3
+    assert info.value.meta["outcome"] == "not_sent" and info.value.meta["request_sent"] is False
 
 
 @pytest.mark.parametrize(
@@ -144,8 +171,9 @@ async def test_partial_write_is_an_error():
         return {"success": True, "data": {"written_bytes": 1}}
 
     async with fake_mock_server(handler) as (port, _):
-        with pytest.raises(ProfibusMasterError, match="accepted 1 of 2 output bytes"):
+        with pytest.raises(OutcomeUnknownError, match="reported 1 of 2 output bytes written") as info:
             await mock_master(port, writes_enabled=True).write_outputs(5, [1, 2])
+    assert info.value.meta["outcome"] == "unknown"
 
 
 async def test_writes_are_refused_by_default_before_anything_is_sent():
@@ -155,7 +183,13 @@ async def test_writes_are_refused_by_default_before_anything_is_sent():
         with pytest.raises(WritesDisabledError, match="PROFIBUS_WRITES_ENABLED=true") as info:
             await master.write_outputs(5, [1])
     assert received == []
-    assert info.value.meta == {"backend": "mock", "writes_enabled": False, "slave_address": 5}
+    assert info.value.meta == {
+        "backend": "mock",
+        "writes_enabled": False,
+        "slave_address": 5,
+        "outcome": "not_sent",
+        "request_sent": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -174,9 +208,11 @@ async def test_writes_are_refused_by_default_before_anything_is_sent():
 )
 async def test_invalid_arguments_are_rejected_before_sending(call, message):
     async with fake_mock_server(good_slave) as (port, received):
-        with pytest.raises(InvalidArgumentError, match=message):
+        with pytest.raises(InvalidArgumentError, match=message) as info:
             await call(mock_master(port, writes_enabled=True))
     assert received == []
+    if "data" in message or "244" in message or "byte values" in message:
+        assert info.value.meta["outcome"] == "not_sent"
 
 
 async def test_serial_backend_is_not_implemented_and_never_opens_the_port(monkeypatch):
@@ -196,6 +232,7 @@ async def test_serial_backend_is_not_implemented_and_never_opens_the_port(monkey
             await call
         assert info.value.meta["backend"] == "serial"
         assert info.value.meta["implemented"] is False
+        assert info.value.meta["request_sent"] is False
     status = master.status()
     assert status["port_opened"] is False and status["bus_communication"] == "not implemented"
 
@@ -206,9 +243,23 @@ def test_serial_backend_accepts_pyserial_urls(port):
     assert SerialBackend(ProfibusConfig(port=port)).status()["port"] == port
 
 
-def test_serial_backend_rejects_unknown_url_schemes():
-    with pytest.raises(ConfigError, match="PROFIBUS_PORT"):
-        SerialBackend(ProfibusConfig(port="sockt://127.0.0.1:7100"))
+@pytest.mark.parametrize(
+    "port",
+    [
+        "sockt://127.0.0.1:7100",  # typo
+        "hwgrep://.*",  # test-opens every matching port even with do_not_open=True
+        "spy:///dev/ttyUSB0",
+        "alt:///dev/ttyUSB0?class=PosixPollSerial",
+        "cp2110://0001:0002:00",
+    ],
+)
+def test_serial_backend_rejects_url_schemes_outside_the_allow_list(port, monkeypatch):
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError("serial_for_url must not see a refused URL")
+
+    monkeypatch.setattr(serial, "serial_for_url", must_not_be_called)
+    with pytest.raises(ConfigError, match="PROFIBUS_PORT scheme"):
+        SerialBackend(ProfibusConfig(port=port))
 
 
 def test_status_reports_one_writes_flag():
