@@ -16,7 +16,7 @@ from profibus_mcp.pb_master import ProfibusMaster
 from profibus_mcp.server import ProfibusMCPServer
 
 from .conftest import DATA_DIR
-from .fakes import FakeBackend
+from .fakes import FakeBackend, RecordingStream, fake_mock_server
 
 pytestmark = pytest.mark.anyio
 
@@ -304,3 +304,76 @@ async def test_ping_reports_backend_and_version():
     assert ping["data"]["backend"] == "mock" and ping["meta"]["backend"] == "mock"
     assert ping["data"]["writes_enabled"] is False
     assert "config_cmds_enabled" not in ping["data"]
+
+
+async def test_mcp_cancel_in_the_same_step_as_connect_never_sends(monkeypatch):
+    """CANCEL RACE through the real SDK: RequestResponder.cancel() in the connect's completion step.
+
+    Also fails if the private mcp internals this relies on move: the scope the
+    gate sees must be the in-flight responder's _cancel_scope.
+    """
+    import anyio
+    from mcp.server.lowlevel.server import request_ctx
+    from mcp.shared.exceptions import McpError
+
+    from profibus_mcp import pb_master
+
+    async def ok(request):
+        if request["op"] == "write_outputs":
+            return {"success": True, "data": {"written_bytes": len(request["data"])}}
+        return {"success": False, "error": "unexpected", "applied": False}
+
+    attempted: list[bytes] = []
+    async with fake_mock_server(ok) as (port, received):
+        config = ProfibusConfig(backend="mock", mock_port=port, writes_enabled=True)
+        server = ProfibusMCPServer(config)
+        real_connect = anyio.connect_tcp
+        async with create_connected_server_and_client_session(server.mcp) as session:
+            for _ in range(30):
+                waiting, go, seen = anyio.Event(), anyio.Event(), {}
+
+                async def connect(*args, _go=go, _waiting=waiting, _seen=seen, **kwargs):
+                    stream = await real_connect(*args, **kwargs)
+                    rc = request_ctx.get()
+                    responder = rc.session._in_flight[rc.request_id]
+                    _seen["responder"] = responder
+                    _seen["gate_scope_is_responder_scope"] = (
+                        pb_master._REQUEST_CANCEL_SCOPE.get() is responder._cancel_scope
+                    )
+                    _waiting.set()
+                    await _go.wait()  # completes in the same step as the SDK's cancel below
+                    return RecordingStream(stream, attempted)
+
+                monkeypatch.setattr(anyio, "connect_tcp", connect)
+                outcome: dict[str, Any] = {}
+
+                async def call(_outcome=outcome):
+                    try:
+                        _outcome["result"] = await session.call_tool("write_outputs", {"slave_address": 5, "data": [1]})
+                    except McpError as exc:
+                        _outcome["error"] = exc
+
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(call)
+                    await waiting.wait()
+                    go.set()
+                    await seen["responder"].cancel()  # what the SDK does on notifications/cancelled
+                assert seen["gate_scope_is_responder_scope"] is True
+                assert "Request cancelled" in str(outcome.get("error")), outcome
+            monkeypatch.setattr(anyio, "connect_tcp", real_connect)
+            # The server survived every cancelled call (no second reply to a cancelled request).
+            ping = await call_envelope(session, "ping")
+            assert ping["success"] is True
+        await anyio.sleep(0.1)
+    assert attempted == []
+    assert received == []
+
+
+async def call_envelope(session, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    return await call(session, name, arguments)
+
+
+def test_request_cancel_scope_is_none_outside_a_request():
+    from profibus_mcp.tools import capture_request_cancel_scope
+
+    assert capture_request_cancel_scope(ProfibusMCPServer(ProfibusConfig()).mcp) is None

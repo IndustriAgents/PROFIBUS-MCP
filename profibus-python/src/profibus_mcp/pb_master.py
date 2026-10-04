@@ -25,10 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Protocol
 
 import anyio
+import anyio.lowlevel
 import serial
 from anyio.streams.buffered import BufferedByteReceiveStream
 
@@ -46,6 +49,30 @@ ALLOWED_PORT_SCHEMES = ("socket", "rfc2217", "loop")
 MAX_REPLY_BYTES = 1024 * 1024
 
 Meta = dict[str, Any]
+
+#: The cancel scope of the MCP request being served (set by the tools layer).
+_REQUEST_CANCEL_SCOPE: ContextVar[Any] = ContextVar("profibus_request_cancel_scope", default=None)
+
+
+@contextmanager
+def request_cancel_scope(scope: Any) -> Iterator[None]:
+    """Make the MCP request's cancel scope visible to the pre-send gate for this call."""
+    token = _REQUEST_CANCEL_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _REQUEST_CANCEL_SCOPE.reset(token)
+
+
+def request_cancel_requested() -> bool:
+    """True once the MCP client has cancelled the current request.
+
+    The SDK sets the scope's ``cancel_called`` synchronously when the cancel
+    notification arrives, but anyio does not interrupt a task whose wait (a
+    connect, for example) has just completed: that task runs one more step.
+    Reading the flag right before a send closes that window.
+    """
+    return bool(getattr(_REQUEST_CANCEL_SCOPE.get(), "cancel_called", False))
 
 
 class ProfibusMasterError(RuntimeError):
@@ -199,6 +226,10 @@ class _ClientGone(Exception):
     """Raised instead of sending once the MCP client has disconnected."""
 
 
+class _RequestCancelled(Exception):
+    """Raised instead of sending once the MCP client has cancelled this request."""
+
+
 class _SendState:
     """Whether a request may have left during the current attempt, or any attempt."""
 
@@ -276,6 +307,8 @@ class MockBackend:
         if self.closing:
             meta["request_sent"] = False
             raise ClientDisconnectedError("The MCP client has disconnected; nothing was sent.", meta)
+        if request_cancel_requested():
+            await self._cancelled_before_send(op, meta)
         deadline = self.deadline_s
         raw: bytes | None = None
         scope = anyio.CancelScope()
@@ -285,6 +318,13 @@ class MockBackend:
                 raw = await self._attempts(op, payload, meta, state, retry_after_send)
         except _ClientGone:
             pass  # handled below, like a cancelled scope
+        except _RequestCancelled:
+            await self._cancelled_before_send(op, meta)
+        except anyio.get_cancelled_exc_class():
+            # The MCP client cancelled this call (shutdown() is caught by our own scope).
+            if state.ever_sent:
+                log.warning("%s was cancelled by the MCP client after it was sent; it may have been applied", op)
+            raise
         except ProfibusMasterError:
             raise
         except TimeoutError:
@@ -329,6 +369,18 @@ class MockBackend:
             raise ProfibusMasterError(message, meta)
         return reply.get("data"), meta
 
+    async def _cancelled_before_send(self, op: str, meta: Meta) -> None:
+        """End a request the MCP client cancelled before anything was sent.
+
+        The SDK has already answered the client ("Request cancelled") and must
+        not get a second reply, so the cancellation is re-raised as such. The
+        error below is only a fallback if no cancelled scope encloses us.
+        """
+        log.info("%s was cancelled by the MCP client before it was sent; nothing was sent", op)
+        meta["request_sent"] = False
+        await anyio.lowlevel.checkpoint_if_cancelled()
+        raise ProfibusMasterError("The MCP client cancelled the request; nothing was sent.", meta)
+
     async def _attempts(self, op: str, payload: bytes, meta: Meta, state: _SendState, retry_after_send: bool) -> bytes:
         attempt = 0
         while True:
@@ -361,8 +413,13 @@ class MockBackend:
                         sent=False,
                     ) from None
                 async with stream:
-                    if self.closing:  # no await between this check and the send
+                    # Last check before the send, with no await in between: the
+                    # client may have disconnected, or cancelled this call in the
+                    # same loop step as the connect completed.
+                    if self.closing:
                         raise _ClientGone
+                    if request_cancel_requested():
+                        raise _RequestCancelled
                     state.mark_sent()  # from here on the request may have left
                     await stream.send(payload)
                     return await BufferedByteReceiveStream(stream).receive_until(b"\n", MAX_REPLY_BYTES)

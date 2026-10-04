@@ -20,7 +20,13 @@ from pydantic import Field, Strict
 from . import __version__
 from .config import MAX_STATION_ADDRESS, ProfibusConfig
 from .gsd_parser import GSDParser, GSDParserError
-from .pb_master import MAX_DP_DATA_LEN, ProfibusMaster, ProfibusMasterError, validate_slave_address
+from .pb_master import (
+    MAX_DP_DATA_LEN,
+    ProfibusMaster,
+    ProfibusMasterError,
+    request_cancel_scope,
+    validate_slave_address,
+)
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +142,23 @@ class SlaveMap:
         return len(self._slaves)
 
 
+def capture_request_cancel_scope(server: FastMCP) -> Any:
+    """The cancel scope of the MCP request being served, or None.
+
+    This reads private mcp<2 internals (``session._in_flight[request_id]
+    ._cancel_scope``), hence the pin and a test that fails if they move.
+    """
+    try:
+        rc = server.get_context().request_context
+    except (LookupError, ValueError):
+        return None
+    in_flight = getattr(getattr(rc, "session", None), "_in_flight", None)
+    if not isinstance(in_flight, dict):
+        return None
+    responder = in_flight.get(getattr(rc, "request_id", None))
+    return getattr(responder, "_cancel_scope", None)
+
+
 def alias_problem(spec: Any) -> str | None:
     if not isinstance(spec, dict):
         return "entry must be an object with an 'address'"
@@ -177,9 +200,14 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
             return None, err(f"Alias '{alias}' in SLAVE_MAP_FILE: {problem}", meta)
         return spec["address"], None
 
+    def cancellable():
+        """Expose this call's MCP cancel scope to the pre-send gate."""
+        return request_cancel_scope(capture_request_cancel_scope(server))
+
     async def do_read(slave_address: int, length: int | None, extra: dict[str, Any] | None = None) -> Envelope:
         try:
-            payload, meta = await master.read_inputs(slave_address, length)
+            with cancellable():
+                payload, meta = await master.read_inputs(slave_address, length)
         except Exception as exc:
             return failure(exc, {"slave_address": slave_address, **(extra or {})})
         data = {"slave_address": slave_address, "length": len(payload), "raw_data_hex": payload.hex(), **(extra or {})}
@@ -187,7 +215,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
 
     async def do_write(slave_address: int, data: list[int], extra: dict[str, Any] | None = None) -> Envelope:
         try:
-            written, meta = await master.write_outputs(slave_address, data)
+            with cancellable():
+                written, meta = await master.write_outputs(slave_address, data)
         except ProfibusMasterError as exc:
             return failure(exc, {"slave_address": slave_address, **(extra or {})})
         except Exception as exc:
@@ -211,7 +240,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         Read-only. With PROFIBUS_BACKEND=serial it returns success=false (not implemented).
         """
         try:
-            slaves, meta = await master.scan_bus()
+            with cancellable():
+                slaves, meta = await master.scan_bus()
         except Exception as exc:
             return failure(exc)
         return ok({"slaves": slaves}, meta)
@@ -236,7 +266,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
     async def read_diagnosis(slave_address: SlaveAddress) -> Envelope:
         """Read a slave's diagnosis (status and ident number) as the backend reports it. Read-only."""
         try:
-            diag, meta = await master.read_diagnosis(slave_address)
+            with cancellable():
+                diag, meta = await master.read_diagnosis(slave_address)
         except Exception as exc:
             return failure(exc, {"slave_address": slave_address})
         return ok(diag, meta)
@@ -248,7 +279,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         success=true means the slave answered; success=false gives the reason.
         """
         try:
-            diag, meta = await master.read_diagnosis(slave_address)
+            with cancellable():
+                diag, meta = await master.read_diagnosis(slave_address)
         except Exception as exc:
             return failure(exc, {"slave_address": slave_address})
         data = {

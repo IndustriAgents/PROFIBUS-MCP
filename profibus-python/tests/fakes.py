@@ -76,3 +76,31 @@ class FakeBackend:
         if isinstance(reply, Exception):
             raise reply
         return (reply(params) if callable(reply) else reply), {"backend": self.name}
+
+
+class RecordingStream:
+    """Wraps an anyio socket stream and records every attempted send."""
+
+    def __init__(self, inner: Any, attempted: list[bytes]) -> None:
+        self.inner = inner
+        self.attempted = attempted
+
+    async def send(self, data: bytes) -> None:
+        self.attempted.append(data)
+        await self.inner.send(data)
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        return await self.inner.receive(max_bytes)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+    @property
+    def extra_attributes(self) -> Any:
+        return self.inner.extra_attributes
+
+    async def __aenter__(self) -> RecordingStream:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.aclose()

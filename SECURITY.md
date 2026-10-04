@@ -42,11 +42,12 @@ application on the office network.
   are annotated as not idempotent so clients do not retry them either; check
   the outputs before trying again. Every request has an overall deadline, so a
   call cannot hang without an outcome.
-- **A disconnected client cannot leave a write behind.** When the client's
-  stdin closes, the server cancels every pending device request before
-  exiting. A write that was still connecting or waiting to retry is never
-  sent; one already on its way is reported as `unknown` (in the log, since the
-  client is gone).
+- **A cancelled call or a disconnected client cannot leave a write behind.**
+  When the client cancels a call (`notifications/cancelled`) or its stdin
+  closes, a write that was still connecting or waiting to retry is never sent:
+  right before the send the server checks both the disconnect flag and the
+  call's cancel flag, which the SDK sets the moment the cancel arrives. A write
+  already on its way may have been applied; the server logs that.
 - **Confine `load_gsd_file`.** Without `PROFIBUS_GSD_PATH`, `load_gsd_file`
   opens any file the server's account can read. It returns only parsed GSD
   content and its errors do not echo file contents, but whether it says "not

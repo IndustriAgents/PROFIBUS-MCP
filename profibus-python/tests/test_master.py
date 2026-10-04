@@ -20,9 +20,10 @@ from profibus_mcp.pb_master import (
     RequestRejectedError,
     SerialBackend,
     WritesDisabledError,
+    request_cancel_scope,
 )
 
-from .fakes import CLOSE, HANG, fake_mock_server, free_port
+from .fakes import CLOSE, HANG, RecordingStream, fake_mock_server, free_port
 
 pytestmark = pytest.mark.anyio
 
@@ -277,6 +278,69 @@ async def test_no_request_is_sent_after_the_client_disconnected():
             await master.read_inputs(5, 4)
     assert info.value.meta["outcome"] == "not_sent"
     assert info.value.meta["attempts"] == 0  # not even a connection attempt
+    assert received == []
+
+
+async def test_cancel_in_the_same_step_as_connect_completion_never_sends(monkeypatch):
+    """The CANCEL RACE: the call is cancelled in the same loop step as its connect completes.
+
+    anyio does not interrupt a task whose wait has just finished, so the task
+    runs one more step. The pre-send gate must refuse on cancel_called, not
+    wait for CancelledError. Looped, and it checks that send() is never even
+    attempted, not just that nothing arrived.
+    """
+    attempted: list[bytes] = []
+    async with fake_mock_server(good_slave) as (port, received):
+        master = mock_master(port, writes_enabled=True)
+        real_connect = anyio.connect_tcp
+        for _ in range(100):
+            scope = anyio.CancelScope()
+            waiting, go = anyio.Event(), anyio.Event()
+
+            async def connect(*args, _go=go, _waiting=waiting, **kwargs):
+                stream = await real_connect(*args, **kwargs)
+                _waiting.set()
+                await _go.wait()  # this wait completes in the same step as the cancel
+                return RecordingStream(stream, attempted)
+
+            monkeypatch.setattr(anyio, "connect_tcp", connect)
+
+            async def complete_and_cancel(_go=go, _waiting=waiting, _scope=scope):
+                await _waiting.wait()
+                _go.set()
+                _scope.cancel()  # like RequestResponder.cancel(): synchronous
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(complete_and_cancel)
+                with scope, request_cancel_scope(scope):
+                    await master.write_outputs(5, [1])
+            assert scope.cancelled_caught
+        await anyio.sleep(0.1)
+    assert attempted == []
+    assert received == []
+
+
+async def test_a_call_cancelled_before_it_starts_never_connects(monkeypatch):
+    # cancel_called is already set when the request starts (no checkpoint has
+    # delivered it yet): it must not even connect, and it must end as a
+    # cancellation (the SDK has already replied), not as a second answer.
+    async with fake_mock_server(good_slave) as (port, received):
+        master = mock_master(port, writes_enabled=True)
+        connects: list[tuple] = []
+        real_connect = anyio.connect_tcp
+
+        async def counting_connect(*args, **kwargs):
+            connects.append(args)
+            return await real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(anyio, "connect_tcp", counting_connect)
+        scope = anyio.CancelScope()
+        with scope, request_cancel_scope(scope):
+            scope.cancel()  # synchronous, like RequestResponder.cancel()
+            await master.write_outputs(5, [1])
+        assert scope.cancelled_caught
+        await anyio.sleep(0.1)
+    assert connects == []
     assert received == []
 
 
