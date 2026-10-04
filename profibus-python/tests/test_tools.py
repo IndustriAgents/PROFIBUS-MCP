@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from typing import Any
 
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-import profibus_mcp
 from profibus_mcp.config import ProfibusConfig
 from profibus_mcp.pb_master import ProfibusMaster
 from profibus_mcp.server import ProfibusMCPServer
@@ -81,7 +81,8 @@ def test_server_reports_its_own_version():
     server = ProfibusMCPServer(ProfibusConfig())
     options = server.mcp._mcp_server.create_initialization_options()
     assert options.server_name == "PROFIBUS MCP Server"
-    assert options.server_version == profibus_mcp.__version__
+    assert options.server_version == version("profibus-mcp")
+    assert options.server_version != version("mcp")
 
 
 async def test_writes_are_disabled_by_default():
@@ -91,9 +92,11 @@ async def test_writes_are_disabled_by_default():
         assert result["success"] is False
         assert "PROFIBUS_WRITES_ENABLED=true" in result["error"] and "Nothing was sent" in result["error"]
         assert result["meta"]["writes_enabled"] is False
+        assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
 
         result = await call(session, "write_slave_by_alias", {"alias": "drive1", "data": [1]})
         assert result["success"] is False and "Writes are disabled" in result["error"]
+        assert result["meta"]["outcome"] == "not_sent"
 
         ping = await call(session, "ping")
         status = await call(session, "get_master_status")
@@ -108,6 +111,7 @@ async def test_enabled_writes_reach_the_backend():
     assert result["success"] is True
     assert result["data"] == {"slave_address": 5, "written_bytes": 2}
     assert result["meta"]["backend"] == "fake"
+    assert result["meta"]["outcome"] == "written"
     assert backend.calls == [("write_outputs", {"address": 5, "data": [1, 255]}, False)]
 
 
@@ -115,14 +119,22 @@ async def test_enabled_writes_reach_the_backend():
     ("tool", "arguments", "problem"),
     [
         ("read_inputs", {"slave_address": "abc"}, "slave_address"),
-        ("read_inputs", {"slave_address": True}, "slave_address"),
+        ("read_inputs", {"slave_address": "5"}, "slave_address"),  # strict: no numeric strings
+        ("read_inputs", {"slave_address": 5.0}, "slave_address"),  # strict: no floats
+        ("read_inputs", {"slave_address": True}, "slave_address"),  # strict: no booleans
         ("read_inputs", {"slave_address": 126}, "slave_address"),
         ("read_inputs", {"slave_address": 5, "length": 0}, "length"),
+        ("read_inputs", {"slave_address": 5, "length": True}, "length"),
         ("read_inputs", {}, "slave_address: Field required"),
         ("write_outputs", {"slave_address": 5, "data": [256]}, "data.0"),
+        ("write_outputs", {"slave_address": 5, "data": [True]}, "data.0"),
+        ("write_outputs", {"slave_address": 5, "data": ["1"]}, "data.0"),
         ("write_outputs", {"slave_address": 5, "data": []}, "data"),
         ("write_outputs", {"slave_address": 5, "data": "not a list"}, "data"),
+        ("write_outputs", {"slave_address": False, "data": [1]}, "slave_address"),
+        ("write_slave_by_alias", {"alias": "drive1", "data": [1.5]}, "data.0"),
         ("read_diagnosis", {"slave_address": 2.5}, "slave_address"),
+        ("test_slave_communication", {"slave_address": None}, "slave_address"),
         ("read_slave_by_alias", {"alias": ""}, "alias"),
     ],
 )
@@ -133,15 +145,11 @@ async def test_bad_arguments_come_back_as_envelopes(tool, arguments, problem):
     assert result["success"] is False
     assert result["error"].startswith("Invalid arguments:")
     assert problem in result["error"]
-    assert result["meta"] == {"tool": tool}
+    expected_meta = {"tool": tool, "backend": "fake"}
+    if tool in {"write_outputs", "write_slave_by_alias"}:
+        expected_meta.update(outcome="not_sent", request_sent=False)
+    assert result["meta"] == expected_meta
     assert backend.calls == []
-
-
-async def test_numeric_strings_are_accepted_for_integers():
-    backend = FakeBackend(fake_replies())
-    async with connect(ProfibusConfig(backend="mock"), backend) as session:
-        result = await call(session, "read_inputs", {"slave_address": "5", "length": "2"})
-    assert result["success"] is True and result["data"]["raw_data_hex"] == "0102"
 
 
 async def test_unknown_tool_is_a_protocol_error():
@@ -188,9 +196,22 @@ async def test_read_tools_return_backend_data():
 async def test_unexpected_backend_exception_becomes_an_envelope():
     replies = fake_replies()
     replies["scan"] = RuntimeError("boom")
-    async with connect(ProfibusConfig(backend="mock"), FakeBackend(replies)) as session:
+    replies["write_outputs"] = RuntimeError("bang")
+    config = ProfibusConfig(backend="mock", writes_enabled=True)
+    async with connect(config, FakeBackend(replies)) as session:
         result = await call(session, "scan_bus")
-    assert result["success"] is False and "boom" in result["error"]
+        assert result["success"] is False and "boom" in result["error"]
+        # An unexpected failure during a write cannot prove nothing was sent.
+        result = await call(session, "write_outputs", {"slave_address": 5, "data": [1]})
+        assert result["success"] is False and "may have been applied" in result["error"]
+        assert result["meta"]["outcome"] == "unknown"
+
+
+async def test_backend_not_implemented_write_is_not_sent():
+    async with connect(ProfibusConfig(writes_enabled=True)) as session:
+        result = await call(session, "write_outputs", {"slave_address": 5, "data": [1]})
+    assert result["success"] is False and "not implemented" in result["error"]
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
 
 
 async def test_slave_aliases(tmp_path):
@@ -224,6 +245,8 @@ async def test_slave_aliases(tmp_path):
         for alias in ("no_address", "text_address", "not_an_object"):
             result = await call(session, "read_slave_by_alias", {"alias": alias})
             assert result["success"] is False and f"Alias '{alias}'" in result["error"], alias
+            result = await call(session, "write_slave_by_alias", {"alias": alias, "data": [1]})
+            assert result["success"] is False and result["meta"]["outcome"] == "not_sent", alias
         unknown = await call(session, "read_slave_by_alias", {"alias": "nope"})
         assert unknown["success"] is False and "Unknown alias" in unknown["error"]
     assert [call_[1]["address"] for call_ in backend.calls] == [5, 5]
@@ -235,6 +258,8 @@ async def test_broken_or_missing_slave_map_is_an_error_not_an_empty_list(tmp_pat
     async with connect(ProfibusConfig(slave_map_path=broken)) as session:
         result = await call(session, "list_slaves")
         assert result["success"] is False and "not valid JSON" in result["error"]
+        ping = await call(session, "ping")
+        assert "not valid JSON" in ping["data"]["slave_map_error"]
     async with connect(ProfibusConfig(slave_map_path=tmp_path / "missing.json")) as session:
         result = await call(session, "list_slaves")
         assert result["success"] is False and "cannot be read" in result["error"]
@@ -265,7 +290,8 @@ async def test_ping_reports_backend_and_version():
     async with connect(ProfibusConfig(backend="mock")) as session:
         ping = await call(session, "ping")
     assert ping["success"] is True
-    assert ping["data"]["version"] == profibus_mcp.__version__
+    assert ping["data"]["version"] == version("profibus-mcp")
+    assert ping["data"]["slave_map_error"] is None
     assert ping["data"]["backend"] == "mock" and ping["meta"]["backend"] == "mock"
     assert ping["data"]["writes_enabled"] is False
     assert "config_cmds_enabled" not in ping["data"]

@@ -12,7 +12,7 @@ from . import __version__
 from .config import ProfibusConfig
 from .gsd_parser import GSDParser
 from .pb_master import ProfibusMaster
-from .tools import SlaveMap, ToolResources, err, register_tools
+from .tools import NOT_SENT, WRITE_TOOLS, SlaveMap, ToolResources, err, register_tools
 
 SERVER_NAME = "PROFIBUS MCP Server"
 
@@ -25,6 +25,9 @@ class EnvelopeFastMCP(FastMCP):
     the suite's ``{success, data, error, meta}`` contract for bad input too.
     """
 
+    #: Name of the configured backend, reported in argument-error envelopes.
+    backend_name: str = "unknown"
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         try:
             return await super().call_tool(name, arguments)
@@ -32,7 +35,10 @@ class EnvelopeFastMCP(FastMCP):
             tool = self._tool_manager.get_tool(name)
             if tool is None:
                 raise
-            envelope = err(_describe(exc), {"tool": name})
+            meta: dict[str, Any] = {"tool": name, "backend": self.backend_name}
+            if name in WRITE_TOOLS:
+                meta.update(NOT_SENT)
+            envelope = err(_describe(exc), meta)
             return tool.fn_metadata.convert_result(envelope)
 
 
@@ -58,11 +64,12 @@ def _instructions(config: ProfibusConfig) -> str:
             "Backend: serial. Bus tools return success=false (not implemented): this server has no "
             "PROFIBUS DP master stack yet."
         )
-    writes = (
-        "Writes are ENABLED: write_outputs and write_slave_by_alias change physical outputs."
-        if config.writes_enabled
-        else "Writes are disabled (PROFIBUS_WRITES_ENABLED=false); write tools refuse every call."
-    )
+    if not config.writes_enabled:
+        writes = "Writes are disabled (PROFIBUS_WRITES_ENABLED=false); write tools refuse every call."
+    elif config.backend == "mock":
+        writes = "Writes are enabled: write_outputs and write_slave_by_alias change the mock slave's outputs."
+    else:
+        writes = "Writes are enabled, but the serial backend is not implemented, so nothing is sent."
     return f"PROFIBUS DP tools. {source} {writes} Every tool returns {{success, data, error, meta}}."
 
 
@@ -73,6 +80,7 @@ class ProfibusMCPServer:
         self.slave_map = SlaveMap(self.config.slave_map_path)
         self.gsd_parser = GSDParser(self.config.gsd_base_path)
         self.mcp = EnvelopeFastMCP(name=SERVER_NAME, instructions=_instructions(self.config))
+        self.mcp.backend_name = self.master.backend.name
         # FastMCP has no version argument; without this, serverInfo.version
         # reports the mcp SDK's version instead of ours.
         self.mcp._mcp_server.version = __version__

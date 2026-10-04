@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BeforeValidator, Field
+from pydantic import Field, Strict
 
 from . import __version__
 from .config import MAX_STATION_ADDRESS, ProfibusConfig
@@ -39,17 +39,12 @@ def err(message: str, meta: dict[str, Any] | None = None) -> Envelope:
     return envelope(False, error=message, meta=meta)
 
 
-def _reject_bool(value: Any) -> Any:
-    # pydantic's lax mode would turn true/false into 1/0.
-    if isinstance(value, bool):
-        raise ValueError("expected an integer, not a boolean")
-    return value
-
-
+# Strict integers: pydantic's lax mode would accept true/false as 1/0, "5"
+# and 5.0. Addresses, lengths and byte values must be real JSON integers.
 SlaveAddress = Annotated[
     int,
     Field(ge=0, le=MAX_STATION_ADDRESS, description=f"DP station address of the slave (0-{MAX_STATION_ADDRESS})"),
-    BeforeValidator(_reject_bool),
+    Strict(),
 ]
 ReadLength = Annotated[
     int | None,
@@ -58,9 +53,9 @@ ReadLength = Annotated[
         le=MAX_DP_DATA_LEN,
         description="Number of input bytes to read (1-244). Omit to read all of the slave's input bytes.",
     ),
-    BeforeValidator(_reject_bool),
+    Strict(),
 ]
-ByteValue = Annotated[int, Field(ge=0, le=255), BeforeValidator(_reject_bool)]
+ByteValue = Annotated[int, Field(ge=0, le=255), Strict()]
 OutputData = Annotated[
     list[ByteValue],
     Field(
@@ -70,6 +65,10 @@ OutputData = Annotated[
     ),
 ]
 Alias = Annotated[str, Field(min_length=1, description="Alias defined in SLAVE_MAP_FILE")]
+
+#: Tools that change outputs; their failures always say whether anything was sent.
+WRITE_TOOLS = frozenset({"write_outputs", "write_slave_by_alias"})
+NOT_SENT: dict[str, Any] = {"outcome": "not_sent", "request_sent": False}
 
 _READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 _LOCAL = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -165,9 +164,9 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         log.exception("unexpected error in a PROFIBUS tool")
         return err(f"Unexpected error: {exc}", {"backend": backend, **(meta or {})})
 
-    def resolve_alias(alias: str) -> tuple[int | None, Envelope | None]:
+    def resolve_alias(alias: str, *, write: bool = False) -> tuple[int | None, Envelope | None]:
         spec = resources.slave_map.get(alias)
-        meta = {"alias": alias, "backend": backend}
+        meta = {"alias": alias, "backend": backend, **(NOT_SENT if write else {})}
         if resources.slave_map.error:
             return None, err(resources.slave_map.error, meta)
         if spec is None:
@@ -188,8 +187,14 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
     async def do_write(slave_address: int, data: list[int], extra: dict[str, Any] | None = None) -> Envelope:
         try:
             written, meta = await master.write_outputs(slave_address, data)
-        except Exception as exc:
+        except ProfibusMasterError as exc:
             return failure(exc, {"slave_address": slave_address, **(extra or {})})
+        except Exception as exc:
+            log.exception("unexpected error in a PROFIBUS write")
+            return err(
+                f"Unexpected error: {exc}. The write may have been applied; check the slave's outputs before retrying.",
+                {"backend": backend, "slave_address": slave_address, "outcome": "unknown", **(extra or {})},
+            )
         return ok({"slave_address": slave_address, "written_bytes": written, **(extra or {})}, meta)
 
     @server.tool(annotations=_READ)
@@ -273,9 +278,9 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         if not config.writes_enabled:
             return err(
                 "Writes are disabled: set PROFIBUS_WRITES_ENABLED=true to allow them. Nothing was sent.",
-                {"alias": alias, "backend": backend, "writes_enabled": False},
+                {"alias": alias, "backend": backend, "writes_enabled": False, **NOT_SENT},
             )
-        address, problem = resolve_alias(alias)
+        address, problem = resolve_alias(alias, write=True)
         if problem:
             return problem
         return await do_write(address, data, {"alias": alias})
@@ -298,7 +303,10 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
 
     @server.tool(annotations=_LOCAL)
     async def ping() -> Envelope:
-        """Report server version, backend, write gate and alias count. Does not contact the bus."""
+        """Report server version, backend, write gate, alias count and any SLAVE_MAP_FILE error.
+
+        Does not contact the bus.
+        """
         data = {
             "server": "PROFIBUS MCP Server",
             "version": __version__,
@@ -306,6 +314,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
             "bus_communication": master.backend.status().get("bus_communication"),
             "writes_enabled": config.writes_enabled,
             "slave_aliases": resources.slave_map.count(),
+            # A broken SLAVE_MAP_FILE would otherwise only show up in list_slaves.
+            "slave_map_error": resources.slave_map.error,
         }
         return ok(data, {"backend": backend})
 
