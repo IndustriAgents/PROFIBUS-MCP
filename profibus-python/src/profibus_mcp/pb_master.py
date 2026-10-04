@@ -184,6 +184,21 @@ class _TransportError(Exception):
         self.sent = sent
 
 
+class _SendState:
+    """Whether a request may have left during the current attempt, or any attempt."""
+
+    def __init__(self) -> None:
+        self.sent = False
+        self.ever_sent = False
+
+    def mark_sent(self) -> None:
+        self.sent = self.ever_sent = True
+
+
+#: Extra seconds on top of the per-attempt timeouts and backoff delays.
+DEADLINE_SLACK_S = 1.0
+
+
 class MockBackend:
     """Client for the JSON-lines protocol of ``profibus-mock-slave``."""
 
@@ -198,37 +213,50 @@ class MockBackend:
     def endpoint(self) -> str:
         return f"{self.host}:{self.port}"
 
+    @property
+    def deadline_s(self) -> float:
+        """Overall bound for one request: every attempt, every backoff delay, plus slack."""
+        retries = self.config.max_retries
+        backoff = self.config.retry_backoff_base * (2**retries - 1)
+        return self.config.timeout_s * (retries + 1) + backoff + DEADLINE_SLACK_S
+
     def status(self) -> dict[str, Any]:
         return {
             "backend": self.name,
             "endpoint": self.endpoint,
+            "deadline_s": round(self.deadline_s, 3),
             "bus_communication": "profibus-mock-slave over TCP (JSON lines); no PROFIBUS telegrams",
         }
 
     async def request(self, op: str, params: dict[str, Any], *, retry_after_send: bool) -> tuple[Any, Meta]:
         """Send one request and return the reply's ``data``.
 
-        Transport failures are retried ``max_retries`` times with exponential
-        backoff. When ``retry_after_send`` is false (writes), a request is only
-        retried if the connection could not be made, so it is never sent twice.
+        Each attempt (connect, send, reply) is bounded by PROFIBUS_TIMEOUT, and
+        the whole request, retries included, by :attr:`deadline_s`. Transport
+        failures are retried ``max_retries`` times with exponential backoff.
+        When ``retry_after_send`` is false (writes), a request is only retried
+        if the connection could not be made, so it is never sent twice.
+
+        Errors carry ``meta.request_sent``. Only a reply with ``"applied":
+        false`` (a refusal before anything changed) raises
+        :class:`RequestRejectedError`.
         """
         payload = json.dumps({"op": op, **params}).encode("utf-8") + b"\n"
         meta: Meta = {"backend": self.name, "endpoint": self.endpoint, "attempts": 0}
-        attempt = 0
-        while True:
-            attempt += 1
-            meta["attempts"] = attempt
-            try:
-                raw = await self._exchange(payload)
-                break
-            except _TransportError as exc:
-                retryable = retry_after_send or not exc.sent
-                if attempt > self.config.max_retries or not retryable:
-                    meta["request_sent"] = exc.sent
-                    raise ProfibusMasterError(str(exc), meta) from exc
-                delay = self.config.retry_backoff_base * (2 ** (attempt - 1))
-                log.debug("mock request %s failed (%s); retrying in %.3fs", op, exc, delay)
-                await anyio.sleep(delay)
+        state = _SendState()
+        deadline = self.deadline_s
+        try:
+            with anyio.fail_after(deadline):
+                raw = await self._attempts(op, payload, meta, state, retry_after_send)
+        except TimeoutError:
+            # Something hung beyond every per-attempt bound. Whether the
+            # request went out cannot be known, so assume it did.
+            meta["request_sent"] = True
+            raise ProfibusMasterError(
+                f"No complete answer from the mock slave at {self.endpoint} within the overall deadline "
+                f"of {deadline:.1f} s",
+                meta,
+            ) from None
 
         meta["request_sent"] = True
         try:
@@ -240,46 +268,61 @@ class MockBackend:
         if not isinstance(reply, dict) or not isinstance(reply.get("success"), bool):
             raise ProfibusMasterError(f"The mock slave at {self.endpoint} sent an unexpected reply", meta)
         if not reply["success"]:
-            raise RequestRejectedError(f"Mock slave: {reply.get('error') or 'request failed'}", meta)
+            message = f"Mock slave: {reply.get('error') or 'request failed'}"
+            if reply.get("applied") is False:
+                raise RequestRejectedError(message, meta)
+            # No promise that nothing changed (e.g. an internal error).
+            raise ProfibusMasterError(message, meta)
         return reply.get("data"), meta
 
-    async def _exchange(self, payload: bytes) -> bytes:
-        timeout = self.config.timeout_s
-        try:
-            with anyio.fail_after(timeout):
-                stream = await anyio.connect_tcp(self.host, self.port)
-        except TimeoutError:
-            raise _TransportError(
-                f"Timed out after {self.config.timeout_ms} ms connecting to the mock slave at {self.endpoint}",
-                sent=False,
-            ) from None
-        except OSError as exc:
-            raise _TransportError(
-                f"Cannot reach the PROFIBUS mock slave at {self.endpoint} ({exc}). Start it with "
-                "`uv run profibus-mock-slave` or check PROFIBUS_MOCK_HOST / PROFIBUS_MOCK_PORT.",
-                sent=False,
-            ) from None
-
-        sent = False
-        async with stream:
+    async def _attempts(self, op: str, payload: bytes, meta: Meta, state: _SendState, retry_after_send: bool) -> bytes:
+        attempt = 0
+        while True:
+            attempt += 1
+            meta["attempts"] = attempt
             try:
-                with anyio.fail_after(timeout):
-                    sent = True
+                return await self._exchange(payload, state)
+            except _TransportError as exc:
+                retryable = retry_after_send or not exc.sent
+                if attempt > self.config.max_retries or not retryable:
+                    meta["request_sent"] = state.ever_sent
+                    raise ProfibusMasterError(str(exc), meta) from exc
+                delay = self.config.retry_backoff_base * (2 ** (attempt - 1))
+                log.debug("mock request %s failed (%s); retrying in %.3fs", op, exc, delay)
+                await anyio.sleep(delay)
+
+    async def _exchange(self, payload: bytes, state: _SendState) -> bytes:
+        """One attempt: connect, send, read one reply line, all within PROFIBUS_TIMEOUT."""
+        state.sent = False
+        try:
+            with anyio.fail_after(self.config.timeout_s):
+                try:
+                    stream = await anyio.connect_tcp(self.host, self.port)
+                except OSError as exc:
+                    raise _TransportError(
+                        f"Cannot reach the PROFIBUS mock slave at {self.endpoint} ({exc}). Start it with "
+                        "`uv run profibus-mock-slave` or check PROFIBUS_MOCK_HOST / PROFIBUS_MOCK_PORT.",
+                        sent=False,
+                    ) from None
+                async with stream:
+                    state.mark_sent()  # from here on the request may have left
                     await stream.send(payload)
                     return await BufferedByteReceiveStream(stream).receive_until(b"\n", MAX_REPLY_BYTES)
-            except TimeoutError:
-                raise _TransportError(
-                    f"The mock slave at {self.endpoint} did not answer within {self.config.timeout_ms} ms", sent=sent
-                ) from None
-            except (anyio.EndOfStream, anyio.IncompleteRead, anyio.BrokenResourceError, OSError) as exc:
-                reason = str(exc) or type(exc).__name__
-                raise _TransportError(
-                    f"The connection to the mock slave at {self.endpoint} failed: {reason}", sent=sent
-                ) from None
-            except anyio.DelimiterNotFound:
-                raise _TransportError(
-                    f"The mock slave at {self.endpoint} sent a reply longer than {MAX_REPLY_BYTES} bytes", sent=sent
-                ) from None
+        except TimeoutError:
+            if state.sent:
+                message = f"The mock slave at {self.endpoint} did not answer within {self.config.timeout_ms} ms"
+            else:
+                message = f"Timed out after {self.config.timeout_ms} ms connecting to the mock slave at {self.endpoint}"
+            raise _TransportError(message, sent=state.sent) from None
+        except (anyio.EndOfStream, anyio.IncompleteRead, anyio.BrokenResourceError, OSError) as exc:
+            reason = str(exc) or type(exc).__name__
+            raise _TransportError(
+                f"The connection to the mock slave at {self.endpoint} failed: {reason}", sent=state.sent
+            ) from None
+        except anyio.DelimiterNotFound:
+            raise _TransportError(
+                f"The mock slave at {self.endpoint} sent a reply longer than {MAX_REPLY_BYTES} bytes", sent=state.sent
+            ) from None
 
 
 def create_backend(config: ProfibusConfig) -> Backend:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+
+import anyio
 import pytest
 import serial
 
@@ -38,14 +41,14 @@ async def good_slave(request):
     if op == "scan":
         return {"success": True, "data": SLAVES}
     if request.get("address") != 5:
-        return {"success": False, "error": f"Slave not found at address {request.get('address')}"}
+        return {"success": False, "error": f"Slave not found at address {request.get('address')}", "applied": False}
     if op == "read_inputs":
         return {"success": True, "data": {"address": 5, "raw_data_hex": "0a0b0c0d"[: 2 * request.get("length", 4)]}}
     if op == "write_outputs":
         return {"success": True, "data": {"address": 5, "written_bytes": len(request["data"])}}
     if op == "diagnosis":
         return {"success": True, "data": {"address": 5, "status": "OK", "ident_number": "0x809C"}}
-    return {"success": False, "error": "Unknown op"}
+    return {"success": False, "error": "Unknown op", "applied": False}
 
 
 async def test_mock_backend_round_trip():
@@ -86,6 +89,82 @@ async def test_error_reply_is_an_error_and_is_not_retried():
     assert info.value.meta["backend"] == "mock"
     assert info.value.meta["attempts"] == 1
     assert len(received) == 1
+
+
+async def test_error_without_a_refusal_marker_is_unknown_for_a_write():
+    # Only "applied": false promises nothing changed; an internal error does not.
+    async def handler(request):
+        return {"success": False, "error": "Internal error: RuntimeError: disk on fire"}
+
+    async with fake_mock_server(handler) as (port, received):
+        master = mock_master(port, writes_enabled=True, max_retries=3)
+        with pytest.raises(OutcomeUnknownError, match="may have been applied") as info:
+            await master.write_outputs(5, [1])
+        assert info.value.meta["outcome"] == "unknown" and info.value.meta["request_sent"] is True
+        with pytest.raises(ProfibusMasterError, match="Internal error") as info:
+            await master.read_inputs(5, 4)
+        assert not isinstance(info.value, OutcomeUnknownError)
+    assert len(received) == 2  # neither was retried
+
+
+async def _garbage_forever(stream):
+    """A peer that never sends a line end: garbage the reader can never complete."""
+    try:
+        while True:
+            await stream.send(b"\x00garbage\xff")
+            await anyio.sleep(0.02)
+    except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
+        pass
+
+
+async def test_a_peer_answering_garbage_cannot_hang_a_read_or_a_write():
+    listener = await anyio.create_tcp_listener(local_host="127.0.0.1", local_port=0)
+    port = listener.extra(anyio.abc.SocketAttribute.local_port)
+    async with listener, anyio.create_task_group() as tg:
+        tg.start_soon(listener.serve, _garbage_forever)
+        master = mock_master(port, timeout_ms=200, max_retries=1, writes_enabled=True)
+        bound = master.backend.deadline_s
+        start = time.monotonic()
+        with pytest.raises(ProfibusMasterError, match="did not answer"):
+            await master.read_inputs(5, 4)
+        assert time.monotonic() - start < bound
+        start = time.monotonic()
+        with pytest.raises(OutcomeUnknownError, match="may have been applied") as info:
+            await master.write_outputs(5, [1])
+        assert time.monotonic() - start < bound
+        assert info.value.meta["request_sent"] is True and info.value.meta["outcome"] == "unknown"
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.parametrize("write", [False, True])
+async def test_overall_deadline_bounds_a_request_that_hangs_anyway(monkeypatch, write):
+    # Simulates a stack that swallows a reply without any per-attempt bound firing.
+    async def hang(self, payload, state):
+        state.mark_sent()
+        await anyio.sleep(3600)
+
+    monkeypatch.setattr(MockBackend, "_exchange", hang)
+    master = mock_master(free_port(), timeout_ms=100, max_retries=1, writes_enabled=True)
+    bound = master.backend.deadline_s
+    assert bound < 2
+    start = time.monotonic()
+    with anyio.fail_after(bound + 3):  # the test fails instead of hanging if the deadline is missing
+        if write:
+            with pytest.raises(OutcomeUnknownError, match="overall deadline") as info:
+                await master.write_outputs(5, [1])
+            assert info.value.meta["outcome"] == "unknown"
+        else:
+            with pytest.raises(ProfibusMasterError, match="overall deadline") as info:
+                await master.read_inputs(5, 4)
+    assert info.value.meta["request_sent"] is True
+    assert bound - 0.1 <= time.monotonic() - start < bound + 1
+
+
+def test_deadline_covers_every_attempt_and_backoff():
+    backend = MockBackend(ProfibusConfig(backend="mock", timeout_ms=500, max_retries=2, retry_backoff_base=0.1))
+    # 3 attempts x 0.5 s + backoff 0.1 + 0.2 s + 1 s slack
+    assert backend.deadline_s == pytest.approx(1.5 + 0.3 + 1.0)
+    assert backend.status()["deadline_s"] == pytest.approx(2.8)
 
 
 async def test_unreachable_mock_is_retried_then_reported():
