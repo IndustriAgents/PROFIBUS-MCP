@@ -339,3 +339,97 @@ def test_oversized_and_binary_files_are_refused(tmp_path):
     binary.write_bytes(b"#Profibus_DP\n\x00\x01")
     with pytest.raises(GSDParserError, match="not a text file"):
         GSDParser().load(binary)
+
+
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        "loop1.gsd",  # symlink loop inside the base (RuntimeError or OSError from resolve)
+        "bad\x00name.gsd",  # NUL byte (ValueError)
+        "~no_such_user_profibus/x.gsd",  # unknown home directory (RuntimeError from expanduser)
+    ],
+)
+def test_unresolvable_paths_get_the_same_refusal(tmp_path, attempt):
+    base = tmp_path / "gsd"
+    base.mkdir()
+    (base / "loop1.gsd").symlink_to(base / "loop2.gsd")
+    (base / "loop2.gsd").symlink_to(base / "loop1.gsd")
+    with pytest.raises(GSDParserError, match="outside PROFIBUS_GSD_PATH"):
+        GSDParser(base).load(attempt)
+    # Without PROFIBUS_GSD_PATH such a path is simply not found, never a raw exception.
+    with pytest.raises(GSDParserError, match="not found"):
+        GSDParser().load(str(base / attempt) if attempt == "loop1.gsd" else attempt)
+
+
+@pytest.fixture
+def swapping_open(monkeypatch):
+    """Patch os.open so a path component is swapped just before the open and restored after."""
+    real_open = os.open
+
+    def install(swap, restore):
+        def patched(path, flags, *args, **kwargs):
+            swap()
+            try:
+                return real_open(path, flags, *args, **kwargs)
+            finally:
+                restore()
+
+        monkeypatch.setattr(os, "open", patched)
+
+    return install
+
+
+def _secret_gsd(path):
+    path.write_text(MINIMAL.replace("0x00AB", "0x5EC2"), encoding="ascii")
+
+
+def test_final_component_swapped_for_a_symlink_is_refused(tmp_path, swapping_open):
+    base = tmp_path / "gsd"
+    base.mkdir()
+    target = base / "dev.gsd"
+    target.write_text(MINIMAL, encoding="ascii")
+    outside = tmp_path / "secret.gsd"
+    _secret_gsd(outside)
+    aside = base / "dev.orig"
+
+    def swap():
+        target.rename(aside)
+        target.symlink_to(outside)
+
+    def restore():
+        target.unlink()
+        aside.rename(target)
+
+    swapping_open(swap, restore)
+    with pytest.raises(GSDParserError, match="changed while it was being opened"):
+        GSDParser(base).load("dev.gsd")
+
+
+def test_parent_directory_swapped_for_a_symlink_is_refused(tmp_path, swapping_open):
+    base = tmp_path / "gsd"
+    (base / "sub").mkdir(parents=True)
+    (base / "sub" / "dev.gsd").write_text(MINIMAL, encoding="ascii")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _secret_gsd(elsewhere / "dev.gsd")
+    sub, aside = base / "sub", base / "sub.orig"
+
+    def swap():
+        sub.rename(aside)
+        sub.symlink_to(elsewhere, target_is_directory=True)
+
+    def restore():
+        sub.unlink()
+        aside.rename(sub)
+
+    swapping_open(swap, restore)
+    with pytest.raises(GSDParserError, match="changed while it was being opened"):
+        GSDParser(base).load("sub/dev.gsd")
+
+
+def test_a_fifo_is_not_read(tmp_path):
+    base = tmp_path / "gsd"
+    base.mkdir()
+    os.mkfifo(base / "pipe.gsd")
+    with pytest.raises(GSDParserError):
+        GSDParser(base).load("pipe.gsd")

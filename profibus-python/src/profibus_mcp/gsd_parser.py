@@ -19,16 +19,25 @@ Indexed keywords such as ``Ext_User_Prm_Data_Ref(3)`` may legitimately repeat
 ``indexed_keywords``.
 
 When ``PROFIBUS_GSD_PATH`` is set, :class:`GSDParser` only opens files inside
-it (after resolving symlinks).
+it (after resolving symlinks). The file is opened without following a final
+symlink and is then checked to be the very file the path still resolves to,
+so swapping a path component between the check and the open cannot make it
+read a file elsewhere.
 """
 
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+#: Open flags: no final symlink, no blocking on a FIFO swapped in.
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
 
 #: Refuse files above this size; real GSD files are far smaller.
 MAX_GSD_BYTES = 4 * 1024 * 1024
@@ -220,49 +229,79 @@ class GSDParser:
 
     def __init__(self, base_path: Path | str | None = None) -> None:
         self.base_path = Path(base_path).expanduser() if base_path else None
-        self._cache: dict[Path, tuple[int, int, dict[str, Any]]] = {}
+        # resolved path -> (st_dev, st_ino, st_mtime_ns, st_size, result)
+        self._cache: dict[Path, tuple[int, int, int, int, dict[str, Any]]] = {}
 
     def resolve(self, filepath: str | Path) -> Path:
         """Locate ``filepath``.
 
         Without ``PROFIBUS_GSD_PATH`` any readable path is accepted. With it, a
         relative path is taken relative to that directory, and the resolved
-        file (symlinks followed) must lie inside it; other paths are refused
-        before checking whether they exist, so the error says nothing about
-        files elsewhere.
+        file (symlinks followed) must lie inside it. Anything else, including
+        a path that cannot be resolved at all (a symlink loop, a NUL byte), is
+        refused with the same error before checking whether it exists, so the
+        error says nothing about files elsewhere.
         """
-        path = Path(filepath).expanduser()
+        shown = repr(str(filepath))
         if self.base_path is None:
-            if path.is_file():
-                return path.resolve()
-            raise GSDParserError(f"GSD file not found: {filepath}")
-        base = self.base_path.resolve()
-        resolved = (path if path.is_absolute() else base / path).resolve()
-        if not resolved.is_relative_to(base):
-            raise GSDParserError(f"{filepath} is outside PROFIBUS_GSD_PATH ({base}); only files there can be loaded")
-        if not resolved.is_file():
-            raise GSDParserError(f"GSD file not found in PROFIBUS_GSD_PATH: {filepath}")
+            try:
+                path = Path(filepath).expanduser()
+                if path.is_file():
+                    return path.resolve()
+            except (OSError, RuntimeError, ValueError):
+                pass
+            raise GSDParserError(f"GSD file not found: {shown}")
+        try:
+            base = self.base_path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            raise GSDParserError("PROFIBUS_GSD_PATH cannot be resolved") from None
+        outside = GSDParserError(f"{shown} is outside PROFIBUS_GSD_PATH ({base}); only files there can be loaded")
+        try:
+            path = Path(filepath).expanduser()
+            resolved = (path if path.is_absolute() else base / path).resolve()
+            inside = resolved.is_relative_to(base)
+        except (OSError, RuntimeError, ValueError):
+            raise outside from None
+        if not inside:
+            raise outside
+        try:
+            found = resolved.is_file()
+        except (OSError, ValueError):
+            found = False
+        if not found:
+            raise GSDParserError(f"GSD file not found in PROFIBUS_GSD_PATH: {shown}")
         return resolved
 
     def load(self, filepath: str | Path) -> dict[str, Any]:
         return self.load_with_status(filepath)[0]
 
     def load_with_status(self, filepath: str | Path) -> tuple[dict[str, Any], bool]:
-        """Return ``(parsed, from_cache)``. The cache is keyed on mtime and size."""
+        """Return ``(parsed, from_cache)``. The cache is keyed on device, inode, mtime and size."""
         path = self.resolve(filepath)
         try:
-            stat = path.stat()
+            fd = os.open(path, _OPEN_FLAGS)
         except OSError as exc:
+            if exc.errno == errno.ELOOP:  # the resolved path became a symlink
+                raise GSDParserError(f"{str(filepath)!r} changed while it was being opened; refused") from None
             raise GSDParserError(f"Cannot read GSD file {path}: {exc.strerror}") from None
-        cached = self._cache.get(path)
-        if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-            return cached[2], True
-        if stat.st_size > MAX_GSD_BYTES:
-            raise GSDParserError(f"{path} is {stat.st_size} bytes; GSD files above {MAX_GSD_BYTES} bytes are refused")
         try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            raise GSDParserError(f"Cannot read GSD file {path}: {exc.strerror}") from None
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise GSDParserError(f"{path} is not a regular file")
+            self._check_still_the_same(filepath, path, info)
+            cached = self._cache.get(path)
+            stamp = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+            if cached and cached[:4] == stamp:
+                return cached[4], True
+            if info.st_size > MAX_GSD_BYTES:
+                raise GSDParserError(
+                    f"{path} is {info.st_size} bytes; GSD files above {MAX_GSD_BYTES} bytes are refused"
+                )
+            raw = _read_fd(fd, MAX_GSD_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(raw) > MAX_GSD_BYTES:
+            raise GSDParserError(f"{path} grew above {MAX_GSD_BYTES} bytes while being read; refused")
         if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 byte order mark
             raw = raw[3:]
         # GSD files are ASCII in principle; vendors use UTF-8 or Latin-1 for
@@ -273,8 +312,31 @@ class GSDParser:
             text, encoding = raw.decode("latin-1"), "latin-1"
         parsed = parse_gsd_text(text, source=str(path))
         result = {"filepath": str(path), "encoding": encoding, **parsed}
-        self._cache[path] = (stat.st_mtime_ns, stat.st_size, result)
+        self._cache[path] = (*stamp, result)
         return result, False
+
+    def _check_still_the_same(self, filepath: str | Path, path: Path, info: os.stat_result) -> None:
+        """Refuse if ``filepath`` no longer resolves (inside the base) to the file that was opened."""
+        changed = GSDParserError(f"{str(filepath)!r} changed while it was being opened; refused")
+        again = self.resolve(filepath)  # re-checks containment
+        try:
+            now = os.stat(again)
+        except OSError:
+            raise changed from None
+        if again != path or (now.st_dev, now.st_ino) != (info.st_dev, info.st_ino):
+            raise changed
+
+
+def _read_fd(fd: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining > 0:
+        chunk = os.read(fd, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------------------
