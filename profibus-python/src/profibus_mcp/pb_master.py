@@ -76,12 +76,20 @@ class OutcomeUnknownError(ProfibusMasterError):
     """A write was sent but no valid reply confirmed it; it may have been applied."""
 
 
+class ClientDisconnectedError(ProfibusMasterError):
+    """The MCP client went away; the request was stopped (``meta.request_sent`` says if it had left)."""
+
+
 class Backend(Protocol):
     name: str
 
     def status(self) -> dict[str, Any]: ...
 
     async def request(self, op: str, params: dict[str, Any], *, retry_after_send: bool) -> tuple[Any, Meta]: ...
+
+    def shutdown(self) -> None:
+        """The MCP client disconnected: stop every pending request; send nothing new."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +167,9 @@ class SerialBackend:
         except (ValueError, serial.SerialException) as exc:
             raise ConfigError(f"PROFIBUS_PORT {config.port!r} is not a usable port or URL: {exc}") from exc
 
+    def shutdown(self) -> None:
+        """Nothing is ever pending: this backend sends nothing."""
+
     def status(self) -> dict[str, Any]:
         return {
             "backend": self.name,
@@ -182,6 +193,10 @@ class _TransportError(Exception):
     def __init__(self, message: str, *, sent: bool) -> None:
         super().__init__(message)
         self.sent = sent
+
+
+class _ClientGone(Exception):
+    """Raised instead of sending once the MCP client has disconnected."""
 
 
 class _SendState:
@@ -208,6 +223,20 @@ class MockBackend:
         self.config = config
         self.host = config.mock_host
         self.port = config.mock_port
+        #: Set when the MCP client disconnects; checked right before every send.
+        self.closing = False
+        self._scopes: set[anyio.CancelScope] = set()
+
+    def shutdown(self) -> None:
+        """The MCP client disconnected: cancel every pending request.
+
+        A request still connecting or waiting to retry ends without sending
+        (``not_sent``); one already sent ends as ``request_sent`` (a write is
+        then ``unknown``). No new request is sent.
+        """
+        self.closing = True
+        for scope in list(self._scopes):
+            scope.cancel()
 
     @property
     def endpoint(self) -> str:
@@ -244,10 +273,18 @@ class MockBackend:
         payload = json.dumps({"op": op, **params}).encode("utf-8") + b"\n"
         meta: Meta = {"backend": self.name, "endpoint": self.endpoint, "attempts": 0}
         state = _SendState()
+        if self.closing:
+            meta["request_sent"] = False
+            raise ClientDisconnectedError("The MCP client has disconnected; nothing was sent.", meta)
         deadline = self.deadline_s
+        raw: bytes | None = None
+        scope = anyio.CancelScope()
+        self._scopes.add(scope)
         try:
-            with anyio.fail_after(deadline):
+            with scope, anyio.fail_after(deadline):
                 raw = await self._attempts(op, payload, meta, state, retry_after_send)
+        except _ClientGone:
+            pass  # handled below, like a cancelled scope
         except ProfibusMasterError:
             raise
         except TimeoutError:
@@ -265,6 +302,15 @@ class MockBackend:
             raise ProfibusMasterError(
                 f"The request to the mock slave at {self.endpoint} failed: {type(exc).__name__}: {exc}", meta
             ) from exc
+        finally:
+            self._scopes.discard(scope)
+        if raw is None:  # stopped by shutdown(): the MCP client disconnected
+            meta["request_sent"] = state.ever_sent
+            if state.ever_sent:
+                message = "The MCP client disconnected while the request was waiting for its reply."
+            else:
+                message = "The MCP client disconnected before the request was sent; nothing was sent."
+            raise ClientDisconnectedError(message, meta)
 
         meta["request_sent"] = True
         try:
@@ -315,6 +361,8 @@ class MockBackend:
                         sent=False,
                     ) from None
                 async with stream:
+                    if self.closing:  # no await between this check and the send
+                        raise _ClientGone
                     state.mark_sent()  # from here on the request may have left
                     await stream.send(payload)
                     return await BufferedByteReceiveStream(stream).receive_until(b"\n", MAX_REPLY_BYTES)
@@ -430,6 +478,12 @@ class ProfibusMaster:
             raise ProfibusMasterError("The backend sent a malformed diagnosis reply", meta)
         diag = {key: value for key, value in data.items() if key != "address"}
         return {"slave_address": address, **diag}, meta
+
+    def shutdown(self) -> None:
+        """The MCP client disconnected: stop pending requests (see the backends)."""
+        shutdown = getattr(self.backend, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
 
     def status(self) -> dict[str, Any]:
         return {

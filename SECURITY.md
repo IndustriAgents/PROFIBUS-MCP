@@ -42,6 +42,11 @@ application on the office network.
   are annotated as not idempotent so clients do not retry them either; check
   the outputs before trying again. Every request has an overall deadline, so a
   call cannot hang without an outcome.
+- **A disconnected client cannot leave a write behind.** When the client's
+  stdin closes, the server cancels every pending device request before
+  exiting. A write that was still connecting or waiting to retry is never
+  sent; one already on its way is reported as `unknown` (in the log, since the
+  client is gone).
 - **Confine `load_gsd_file`.** Without `PROFIBUS_GSD_PATH`, `load_gsd_file`
   opens any file the server's account can read. It returns only parsed GSD
   content and its errors do not echo file contents, but whether it says "not

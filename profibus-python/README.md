@@ -120,7 +120,9 @@ Write tools also report `meta.outcome` and `meta.request_sent`:
 | `unknown` | The request was sent but no valid reply confirmed it (timeout, dropped connection, garbled reply, an error without a refusal, the overall deadline). It may have been applied; check the slave's outputs before retrying |
 
 A write is never sent twice: only a connection that could not be made is
-retried.
+retried. When the MCP client disconnects (its stdin closes), pending requests
+are cancelled: one that has not been sent yet ends as `not_sent` and is never
+sent, and the server exits with status 0.
 
 ## Layout
 

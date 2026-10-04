@@ -11,6 +11,7 @@ import serial
 from profibus_mcp.config import ConfigError, ProfibusConfig
 from profibus_mcp.pb_master import (
     BackendNotImplementedError,
+    ClientDisconnectedError,
     InvalidArgumentError,
     MockBackend,
     OutcomeUnknownError,
@@ -205,6 +206,78 @@ async def test_unexpected_error_reports_whether_anything_was_sent(monkeypatch, s
     assert info.value.meta["request_sent"] is sent
     assert info.value.meta["outcome"] == ("unknown" if sent else "not_sent")
     assert isinstance(info.value, OutcomeUnknownError) is sent
+
+
+async def test_client_disconnect_stops_a_write_waiting_to_retry():
+    # Nothing listens yet, so the write waits in backoff when the client goes away.
+    port = free_port()
+    master = mock_master(port, max_retries=5, retry_backoff_base=2.0, writes_enabled=True)
+
+    async def disconnect_soon():
+        await anyio.sleep(0.3)
+        master.shutdown()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(disconnect_soon)
+        with anyio.fail_after(5), pytest.raises(ClientDisconnectedError, match="nothing was sent") as info:
+            await master.write_outputs(5, [1])
+    assert info.value.meta["outcome"] == "not_sent" and info.value.meta["request_sent"] is False
+    # The mock coming up afterwards receives nothing.
+    async with fake_mock_server(good_slave) as (_, received):
+        await anyio.sleep(0.2)
+    assert received == []
+
+
+async def test_disconnect_between_connect_and_send_sends_nothing(monkeypatch):
+    # Cancellation is only delivered at the next suspension point; the closing
+    # flag is checked right before the send so this window cannot leak a write.
+    async with fake_mock_server(good_slave) as (port, received):
+        master = mock_master(port, writes_enabled=True)
+        real_connect = anyio.connect_tcp
+
+        async def connect_then_disconnect(*args, **kwargs):
+            stream = await real_connect(*args, **kwargs)
+            master.shutdown()
+            return stream
+
+        monkeypatch.setattr(anyio, "connect_tcp", connect_then_disconnect)
+        with pytest.raises(ClientDisconnectedError) as info:
+            await master.write_outputs(5, [1])
+        await anyio.sleep(0.1)
+    assert info.value.meta["outcome"] == "not_sent" and info.value.meta["request_sent"] is False
+    assert received == []
+
+
+async def test_client_disconnect_while_waiting_for_the_reply_is_unknown():
+    async def hang(request):
+        return HANG
+
+    async with fake_mock_server(hang) as (port, received):
+        master = mock_master(port, timeout_ms=5000, writes_enabled=True)
+
+        async def disconnect_soon():
+            await anyio.sleep(0.3)
+            master.shutdown()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(disconnect_soon)
+            with anyio.fail_after(5), pytest.raises(OutcomeUnknownError, match="may have been applied") as info:
+                await master.write_outputs(5, [1])
+    assert info.value.meta["request_sent"] is True and info.value.meta["outcome"] == "unknown"
+    assert len(received) == 1
+
+
+async def test_no_request_is_sent_after_the_client_disconnected():
+    async with fake_mock_server(good_slave) as (port, received):
+        master = mock_master(port, writes_enabled=True)
+        master.shutdown()
+        with pytest.raises(ClientDisconnectedError) as info:
+            await master.write_outputs(5, [1])
+        with pytest.raises(ClientDisconnectedError):
+            await master.read_inputs(5, 4)
+    assert info.value.meta["outcome"] == "not_sent"
+    assert info.value.meta["attempts"] == 0  # not even a connection attempt
+    assert received == []
 
 
 async def test_unreachable_mock_is_retried_then_reported():

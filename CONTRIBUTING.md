@@ -146,7 +146,8 @@ you used.
 - A write is sent at most once. Only a connection that was never made may be
   retried, and every write reports `meta.outcome`. `rejected` is only for a
   refusal that guarantees nothing changed; anything else after the send is
-  `unknown`. Every device request has an overall deadline.
+  `unknown`. Every device request has an overall deadline, and is cancelled
+  (checked right before the send) when the client disconnects.
 - Write tools are annotated `destructiveHint=True`, `idempotentHint=False`.
 - Tool arguments for addresses, lengths and byte values are strict integers.
 - Every tool has a docstring: it is the description the model sees.

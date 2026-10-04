@@ -509,6 +509,82 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map:
     assert "deprecated" in stderr and "PROFIBUS_CONFIG_CMDS_ENABLED is ignored" in stderr
 
 
+def test_client_disconnect_stops_a_pending_write(tmp_path: Path) -> None:
+    """A write still waiting to retry must not be sent after the client disconnects (rules 1 and 12)."""
+    port = free_port()  # nothing listens yet: the write fails to connect and waits in backoff
+    env = _server_env(
+        PYTHONUNBUFFERED="1",
+        PROFIBUS_BACKEND="mock",
+        PROFIBUS_MOCK_PORT=str(port),
+        PROFIBUS_WRITES_ENABLED="true",
+        PROFIBUS_TIMEOUT="1000",
+        PROFIBUS_MAX_RETRIES="5",
+        PROFIBUS_RETRY_BACKOFF_BASE="2",
+    )
+    process = subprocess.Popen(
+        server_cmd(tmp_path),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=tmp_path,
+    )
+    listener: socket.socket | None = None
+    try:
+
+        def send(message: dict[str, Any]) -> None:
+            process.stdin.write(json.dumps(message).encode() + b"\n")
+            process.stdin.flush()
+
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "0"},
+                },
+            }
+        )
+        assert json.loads(process.stdout.readline())["id"] == 1
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        call = {"name": "write_outputs", "arguments": {"slave_address": 5, "data": [0x77]}}
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call})
+        time.sleep(0.7)  # the first connect has failed; the write now waits 2 s to retry
+        process.stdin.close()  # the client disconnects
+
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(16)
+        listener.settimeout(0.1)
+        arrivals = []
+        deadline = time.monotonic() + 4  # well past the retry that would have sent it
+        while time.monotonic() < deadline:
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            connection.settimeout(1)
+            try:
+                arrivals.append(connection.recv(65536))
+            except OSError:
+                arrivals.append(b"<connected>")
+            connection.close()
+        assert arrivals == [], f"the device received a write after the client disconnected: {arrivals}"
+        assert process.wait(timeout=10) == 0
+        stderr = process.stderr.read().decode()
+        assert "MCP client disconnected" in stderr and "Traceback" not in stderr
+    finally:
+        if listener is not None:
+            listener.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
 def test_configuration_error_is_reported_on_stderr_without_traceback(tmp_path: Path) -> None:
     result = subprocess.run(
         server_cmd(tmp_path),

@@ -41,7 +41,9 @@ variable there are ignored with a warning. Every write reports
 anything), `not_sent`, or `unknown` when the request went out but no valid
 reply confirmed it. An `unknown` write may have been applied, and it is never
 re-sent automatically. Every request to the mock has an overall deadline, so no
-call hangs without an outcome. Write tools are annotated as destructive and
+call hangs without an outcome. If the MCP client disconnects, pending requests
+are stopped at once: a write that has not left yet is never sent, and the
+server exits. Write tools are annotated as destructive and
 not idempotent. See [SECURITY.md](SECURITY.md).
 
 `load_gsd_file` parses real PROFIBUS DP GSD files (the ASCII keyword format:
