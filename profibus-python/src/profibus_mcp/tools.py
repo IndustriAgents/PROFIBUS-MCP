@@ -158,7 +158,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
     @server.tool()
     async def load_gsd_file(ctx: Context, filepath: str) -> Dict[str, Any]:  # noqa: ARG001
         try:
-            data = resources.gsd_parser.load_cached(filepath)
+            data = resources.gsd_parser.load(filepath)
         except Exception as exc:
             return _err(str(exc), {"filepath": filepath})
         return _ok(data=data)

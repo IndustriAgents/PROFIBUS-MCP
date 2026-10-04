@@ -1,0 +1,106 @@
+;==============================================================================
+; GSD file for the DEMO-IO 16 (fictional modular remote I/O, test fixture).
+; Written in the layout vendors use: CRLF line ends, aligned keywords,
+; comments, a continuation line, PrmText/ExtUserPrmData blocks and modules.
+;==============================================================================
+#Profibus_DP
+
+; --- Unit definition list ----------------------------------------------------
+GSD_Revision        = 5
+Vendor_Name         = "IndustriAgents Test"
+Model_Name          = "DEMO-IO 16"
+Revision            = "V1.2"
+Revision_Number     = 2
+Ident_Number        = 0x1234
+Protocol_Ident      = 0             ; PROFIBUS DP
+Station_Type        = 0             ; DP slave
+FMS_supp            = 0
+Hardware_Release    = "HW 2"
+Software_Release    = "FW 1.2.0"
+
+9.6_supp            = 1
+19.2_supp           = 1
+45.45_supp          = 1
+93.75_supp          = 1
+187.5_supp          = 1
+500_supp            = 1
+1.5M_supp           = 1
+3M_supp             = 1
+6M_supp             = 1
+12M_supp            = 1
+
+MaxTsdr_9.6         = 60
+MaxTsdr_19.2        = 60
+MaxTsdr_45.45       = 60
+MaxTsdr_93.75       = 60
+MaxTsdr_187.5       = 60
+MaxTsdr_500         = 100
+MaxTsdr_1.5M        = 150
+MaxTsdr_3M          = 250
+MaxTsdr_6M          = 450
+MaxTsdr_12M         = 800
+
+Redundancy          = 0
+Repeater_Ctrl_Sig   = 2
+24V_Pins            = 0
+Implementation_Type = "VPC3+C"
+Bitmap_Device       = "IA1234_N"
+
+freeze_mode_supp    = 1             ; keywords are case-insensitive
+Sync_Mode_supp      = 1
+Auto_Baud_supp      = 1
+Set_Slave_Add_supp  = 0
+Min_Slave_Intervall = 1
+Max_Diag_Data_Len   = 16
+Slave_Family        = 3@IndustriAgents@Demo
+
+; --- Diagnostics -------------------------------------------------------------
+Unit_Diag_Bit(16)   = "Supply voltage missing"
+Unit_Diag_Bit(17)   = "Module fault; see channel diagnosis"
+
+; --- Parameters --------------------------------------------------------------
+Max_User_Prm_Data_Len = 3
+Ext_User_Prm_Data_Const(0) = 0x00,0x00,0x00
+
+PrmText = 1
+Text(0) = "disabled"
+Text(1) = "enabled"
+EndPrmText
+
+ExtUserPrmData = 1 "Diagnosis"
+Bit(0) 1 0-1
+Prm_Text_Ref = 1
+EndExtUserPrmData
+
+Ext_User_Prm_Data_Ref(2) = 1
+
+; --- Modules -----------------------------------------------------------------
+Modular_Station     = 1
+Max_Module          = 4
+Max_Input_Len       = 32
+Max_Output_Len      = 32
+Max_Data_Len        = 64
+Modul_Offset        = 1
+
+Module = "8 DI  DC24V" 0x10
+1
+Info_Text = "8 digital inputs; 1 byte"
+EndModule
+Module = "8 DO  DC24V/0.5A" 0x20
+2
+EndModule
+Module = "2 AI  4..20mA" 0x51
+3
+Ext_Module_Prm_Data_Len = 1
+Ext_User_Prm_Data_Const(0) = 0x02
+EndModule
+Module = "Drive PPO1 (4 PKW + 2 PZD)" 0xF3, \
+                                      0xF1
+4
+EndModule
+Module = "Status (special format)" 0x42,0x07,0x01,0x02
+5
+EndModule
+Module = "Empty slot" 0x00
+6
+EndModule

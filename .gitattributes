@@ -1,0 +1,2 @@
+# GSD files keep their line endings byte for byte (vendor files are often CRLF).
+*.gsd -text
