@@ -13,14 +13,15 @@ concurrency:
 permissions:
   contents: read
 
-# Everything here runs without PROFIBUS hardware: the server is started with
-# PROFIBUS_MOCK=true (no serial port is opened) and the mock slave is started
-# in-process on a free local port.
+# Everything here runs without PROFIBUS hardware. The server's integration
+# tests start profibus-mock-slave on a free local port and drive the real
+# server over stdio with the MCP client SDK (PROFIBUS_BACKEND=mock). No serial
+# port is ever opened.
 jobs:
   server:
     name: MCP server (profibus-python)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: profibus-python
@@ -34,52 +35,26 @@ jobs:
       - name: Install dependencies from uv.lock
         run: uv sync --locked
 
-      - name: Byte-compile sources
-        run: uv run --no-sync python -m compileall -q src
+      - name: Lint
+        run: uv run --no-sync ruff check .
 
-      - name: Import package
-        run: uv run --no-sync python -c "import profibus_mcp, profibus_mcp.cli, profibus_mcp.server, profibus_mcp.tools, profibus_mcp.pb_master, profibus_mcp.gsd_parser"
+      - name: Check formatting
+        run: uv run --no-sync ruff format --check .
 
-      # A real MCP session over stdio: initialize, tools/list, and one
-      # read-only tool call. PROFIBUS_MOCK=true means no serial port is needed.
-      - name: MCP handshake over stdio (PROFIBUS_MOCK=true)
+      # Unit tests plus the end-to-end stdio tests against the mock slave
+      # (tests/test_integration_stdio.py starts it with `uv run`).
+      - name: Tests
+        run: uv run --no-sync pytest -v
+
+      # Every floor in pyproject.toml must be one the tests pass on: install
+      # the lowest allowed version of each direct dependency into a separate
+      # environment and run the whole suite again.
+      - name: Tests with the lowest direct dependencies
         run: |
-          uv run --no-sync python - <<'EOF'
-          import json
-          import sys
-
-          import anyio
-          from mcp import ClientSession, StdioServerParameters
-          from mcp.client.stdio import stdio_client
-
-          EXPECTED = {
-              "scan_bus", "read_inputs", "write_outputs", "read_diagnosis",
-              "load_gsd_file", "list_slaves", "read_slave_by_alias",
-              "write_slave_by_alias", "ping", "get_master_status",
-              "test_slave_communication",
-          }
-
-          async def main() -> None:
-              params = StdioServerParameters(
-                  command=sys.executable,
-                  args=["-m", "profibus_mcp.cli"],
-                  env={"PROFIBUS_MOCK": "true"},
-              )
-              async with stdio_client(params) as (read, write):
-                  async with ClientSession(read, write) as session:
-                      init = await session.initialize()
-                      print("initialize:", init.serverInfo.name)
-                      names = {tool.name for tool in (await session.list_tools()).tools}
-                      print("tools/list:", sorted(names))
-                      assert names == EXPECTED, f"unexpected tool set: {sorted(names ^ EXPECTED)}"
-                      result = await session.call_tool("ping", {})
-                      assert not result.isError, result
-                      envelope = json.loads(result.content[0].text)
-                      print("ping:", envelope)
-                      assert envelope["success"] is True, envelope
-
-          anyio.run(main)
-          EOF
+          uv venv --python 3.11 "$RUNNER_TEMP/lowest"
+          uv pip install --python "$RUNNER_TEMP/lowest" --resolution lowest-direct -e . --group dev
+          uv pip list --python "$RUNNER_TEMP/lowest"
+          "$RUNNER_TEMP/lowest/bin/python" -m pytest -q
 
   mock:
     name: Mock slave (profibus-mock-slave)
@@ -98,64 +73,21 @@ jobs:
       - name: Install dependencies from uv.lock
         run: uv sync --locked
 
-      - name: Byte-compile sources
-        run: uv run --no-sync python -m compileall -q profibus_mock_slave.py
+      - name: Lint
+        run: uv run --no-sync ruff check .
 
-      - name: Import module
-        run: uv run --no-sync python -c "import profibus_mock_slave"
+      - name: Check formatting
+        run: uv run --no-sync ruff format --check .
+
+      - name: Tests
+        run: uv run --no-sync pytest -v
+
+      - name: Tests with the lowest direct dependencies
+        run: |
+          uv venv --python 3.11 "$RUNNER_TEMP/lowest"
+          uv pip install --python "$RUNNER_TEMP/lowest" --resolution lowest-direct -e . --group dev
+          uv pip list --python "$RUNNER_TEMP/lowest"
+          "$RUNNER_TEMP/lowest/bin/python" -m pytest -q
 
       - name: Console entry point
         run: uv run --no-sync profibus-mock-slave --help
-
-      # Starts the mock in-process on a free local port and drives its
-      # TCP JSON-lines protocol: scan, read_inputs, diagnosis.
-      - name: JSON protocol round trip
-        run: |
-          uv run --no-sync python - <<'EOF'
-          import asyncio
-          import json
-          import socket
-
-          from profibus_mock_slave import MockConfig, ProfibusMockServer
-
-          def free_port() -> int:
-              with socket.socket() as s:
-                  s.bind(("127.0.0.1", 0))
-                  return s.getsockname()[1]
-
-          async def main() -> None:
-              port = free_port()
-              server = ProfibusMockServer(MockConfig(host="127.0.0.1", port=port))
-              await server.start()
-              reader, writer = await asyncio.open_connection("127.0.0.1", port)
-
-              async def ask(request):
-                  writer.write(json.dumps(request).encode() + b"\n")
-                  await writer.drain()
-                  return json.loads(await asyncio.wait_for(reader.readline(), 10))
-
-              try:
-                  scan = await ask({"op": "scan"})
-                  print("scan:", scan)
-                  assert scan["success"], scan
-                  assert sorted(s["address"] for s in scan["data"]) == [5, 8], scan
-
-                  inputs = await ask({"op": "read_inputs", "address": 5, "length": 4})
-                  print("read_inputs:", inputs)
-                  assert inputs["success"], inputs
-                  assert len(bytes.fromhex(inputs["data"]["raw_data_hex"])) == 4, inputs
-
-                  diag = await ask({"op": "diagnosis", "address": 5})
-                  print("diagnosis:", diag)
-                  assert diag["success"] and diag["data"]["status"] == "OK", diag
-
-                  missing = await ask({"op": "diagnosis", "address": 99})
-                  print("diagnosis (unknown slave):", missing)
-                  assert missing["success"] is False, missing
-              finally:
-                  writer.close()
-                  await writer.wait_closed()
-                  await server.stop()
-
-          asyncio.run(main())
-          EOF

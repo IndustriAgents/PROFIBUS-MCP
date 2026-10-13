@@ -1,0 +1,33 @@
+#PROFIBUS_DP
+GSD_Revision = 3
+Vendor_Name = "ACME"
+Model_Name = "Modular"
+Ident_Number = 0x1234
+Station_Type = 0
+Modular_Station = 1
+Max_Module = 4
+Max_Input_Len = 244
+Max_Output_Len = 244
+Max_Data_Len = 488
+SlotDefinition
+Slot(1) = "Head" 1 1
+Slot(2) = "IO" 2 2-5
+EndSlotDefinition
+Module = "empty" 0x00
+1
+EndModule
+Module = "8 DI general" 0x10
+2
+EndModule
+module="16 DO, decimal, no spaces"32,33
+3
+endmodule
+Module = "mixed general+special" 0x13, 0x40,0x83, 0x00, 0xC0,0x01,0x7D
+4
+EndModule
+Module = "word consistent IO" 0xF7
+5
+EndModule
+Module = "special, vendor bytes only" 0x02,0x11,0x22
+6
+EndModule

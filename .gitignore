@@ -1,5 +1,6 @@
 # Python / uv
 .venv/
+.venv-*/
 .env
 .env.*
 !.env.example

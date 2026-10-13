@@ -28,15 +28,15 @@ paste the { success, data, error, meta } envelope, or the error
 ```
 
 **What was on the other end?**
-- [ ] Mock mode (`PROFIBUS_MOCK=true`)
-- [ ] The mock slave from this repo
-- [ ] Real equipment — adapter, and slave vendor and model:
+- [ ] The mock slave from this repo (`PROFIBUS_BACKEND=mock`)
+- [ ] The `serial` backend (not implemented yet)
+- [ ] Real equipment through something else — adapter or gateway, and slave vendor and model:
 
 **Environment**
 - OS:
 - Python version:
 - Commit SHA:
-- Relevant settings (`PROFIBUS_PORT`, `PROFIBUS_BAUDRATE`, `PROFIBUS_MASTER_ADDRESS`, ...):
+- Relevant settings (`PROFIBUS_BACKEND`, `PROFIBUS_WRITES_ENABLED`, `PROFIBUS_MOCK_PORT`, `PROFIBUS_PORT`, ...):
 
 **Additional context**
 Slave addresses, slave map, GSD file, stderr logs — whatever would let someone

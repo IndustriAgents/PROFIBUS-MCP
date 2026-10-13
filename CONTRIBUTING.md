@@ -1,7 +1,9 @@
 # Contributing to PROFIBUS MCP
 
-Thanks for taking an interest. This repository is an MCP server scaffold for
-PROFIBUS DP (PA is a goal) plus a mock slave for local testing.
+Thanks for taking an interest. This repository is an MCP server for PROFIBUS DP
+(PA is a goal) plus a mock slave for local testing. The server works end to end
+against the mock; a real DP master backend is not implemented yet (see the
+README's [Status](README.md#status)).
 
 It is also one of the ten servers in
 [IndustriConnect](https://github.com/IndustriAgents/IndustriConnect), which
@@ -15,8 +17,8 @@ change up.
 
 | Path | What it is |
 |------|------------|
-| `profibus-python/` | The MCP server: `pyproject.toml` + `src/profibus_mcp/`, console script `profibus-mcp` |
-| `profibus-mock-slave/` | Mock PROFIBUS DP slave speaking a TCP JSON-lines protocol (`127.0.0.1:7100`) |
+| `profibus-python/` | The MCP server: `pyproject.toml` + `src/profibus_mcp/`, console script `profibus-mcp`, tests in `tests/` |
+| `profibus-mock-slave/` | Mock PROFIBUS DP slaves speaking a TCP JSON-lines protocol (`127.0.0.1:7100`), their GSD files in `gsd/`, tests in `tests/` |
 | `.github/workflows/ci.yml` | The checks every pull request has to pass |
 
 Each directory is its own [`uv`](https://docs.astral.sh/uv/) project with a
@@ -31,10 +33,12 @@ that breaks one of these needs a reason in the pull request:
    A client that can read one server's output can read all ten.
 2. **Read-only by default.** Tools that write outputs change physical
    equipment. They are separated from the read tools and gated by
-   `PROFIBUS_WRITES_ENABLED`. Today that flag defaults to `true` here; making
-   this server read-only by default, like the rest of the suite, is open work.
+   `PROFIBUS_WRITES_ENABLED`, which defaults to `false`.
 3. **A mock for every protocol.** If you add a tool, the mock has to be able to
    answer it, or nobody can test it without a plant.
+4. **No invented data.** A backend that cannot do something returns
+   `success: false` with a clear error; it never reports success for something
+   that did not happen. `meta.backend` says which backend answered.
 
 ## Getting set up
 
@@ -46,15 +50,7 @@ git clone https://github.com/IndustriAgents/PROFIBUS-MCP.git
 cd PROFIBUS-MCP
 ```
 
-The MCP server, in mock mode (no serial port is opened):
-
-```bash
-cd profibus-python
-uv sync
-PROFIBUS_MOCK=true uv run profibus-mcp
-```
-
-The mock slave, in a second terminal:
+Start the mock slave and leave it running in this terminal:
 
 ```bash
 cd profibus-mock-slave
@@ -62,44 +58,71 @@ uv sync
 uv run profibus-mock-slave            # --port / MOCK_PROFIBUS_PORT to move it off 7100
 ```
 
-The serial master in `profibus-python/src/profibus_mcp/pb_master.py` does not
-yet have a client for the mock's TCP protocol, so for now the two are exercised
-separately: the server with `PROFIBUS_MOCK=true`, the mock directly over TCP
-(see its [README](profibus-mock-slave/README.md)). Wiring them together is a
-welcome contribution.
+In a second terminal, change to the repository root (the `PROFIBUS-MCP`
+directory you cloned), then start the server against the mock:
+
+```bash
+cd profibus-python
+uv sync
+PROFIBUS_BACKEND=mock uv run profibus-mcp
+```
+
+The server speaks MCP over stdio, so it waits for a client; the Inspector
+command below gives you one.
 
 ## Testing a change
 
-There is no test suite yet. CI runs the checks below; run them locally before
-pushing:
+CI runs the checks below. Run them locally before pushing, starting from the
+repository root:
 
 ```bash
 cd profibus-python
 uv sync --locked
-uv run --no-sync python -m compileall -q src
-uv run --no-sync python -c "import profibus_mcp, profibus_mcp.cli"
-
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync pytest -v
+rm -rf .venv-lowest
+uv venv --python 3.11 .venv-lowest
+uv pip install --python .venv-lowest --resolution lowest-direct -e . --group dev
+.venv-lowest/bin/python -m pytest -q
 cd ../profibus-mock-slave
 uv sync --locked
-uv run --no-sync python -m compileall -q profibus_mock_slave.py
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync pytest -v
+rm -rf .venv-lowest
+uv venv --python 3.11 .venv-lowest
+uv pip install --python .venv-lowest --resolution lowest-direct -e . --group dev
+.venv-lowest/bin/python -m pytest -q
 uv run --no-sync profibus-mock-slave --help
+cd ..
 ```
 
-CI also opens a real MCP session against the server (initialize, `tools/list`,
-`ping`) and drives the mock's JSON protocol in-process; the exact scripts are in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). If you add or rename a
-tool, update the expected tool set there.
+The `.venv-lowest` runs install the lowest version of each direct dependency
+that `pyproject.toml` allows: every floor there has to be one the tests pass
+on. If you raise a floor or use a newer API, raise the floor too.
+
+The server's suite includes `tests/test_integration_stdio.py`, which starts the
+mock slave itself (with `uv run`, on a free port) and drives the real server
+over stdio with the MCP client SDK: every tool, the write gate, stdout carrying
+only JSON-RPC (unbuffered, so a stray `print()` fails it), the `.env` rules (on
+a copy of the source tree, so your own `profibus-python/.env` is never touched
+or read), and a clean exit on a bad setting. The mock it starts watches a stdin
+pipe (`--exit-on-stdin-eof`), so even a killed test run leaves no mock behind. If you add or rename a tool,
+update the expected tool set there and in `tests/test_tools.py`. `ruff format .`
+fixes formatting.
 
 Then drive the server the way a user would, through the
 [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) or a
-real client:
+real client. With the mock running, from the repository root:
 
 ```bash
 cd profibus-python
-npx @modelcontextprotocol/inspector -e PROFIBUS_MOCK=true uv run profibus-mcp
+npx @modelcontextprotocol/inspector -e PROFIBUS_BACKEND=mock uv run profibus-mcp
 ```
 
-Call the tool you changed, and check the envelope, not just the value.
+Call the tool you changed, and check the envelope, not just the value. Add
+`-e PROFIBUS_WRITES_ENABLED=true` to try the write tools.
 
 If you change dependencies, run `uv lock` in that project and commit the
 updated `uv.lock`; CI installs with `--locked` and fails if the lockfile is out
@@ -115,7 +138,21 @@ you used.
   goes to `stderr`. A stray `print()` corrupts the session.
 - Fail at startup, not at the first tool call, when configuration is unusable.
 - An error is a returned `{ success: false, error }`, not an exception that
-  kills the server. The model needs to be told what went wrong.
+  kills the server. The model needs to be told what went wrong. That includes
+  bad arguments.
+- Read configuration in `ProfibusConfig.from_env()`, never at import time, so
+  `.env` reaches every setting. A new safety switch must be named
+  `PROFIBUS_*_ENABLED` so the implicit `profibus-python/.env` cannot set it.
+- A write is sent at most once. Only a connection that was never made may be
+  retried, and every write reports `meta.outcome`. `rejected` is only for a
+  refusal that guarantees nothing changed; anything else after the send is
+  `unknown`. Every device request has an overall deadline, and is cancelled
+  when the client disconnects or cancels the call. The check right before the
+  send reads the MCP request's `cancel_called` flag, because anyio does not
+  interrupt a task whose wait has just completed.
+- Write tools are annotated `destructiveHint=True`, `idempotentHint=False`.
+- Tool arguments for addresses, lengths and byte values are strict integers.
+- Every tool has a docstring: it is the description the model sees.
 - Keep tool names and argument names aligned with the other IndustriConnect
   servers.
 
