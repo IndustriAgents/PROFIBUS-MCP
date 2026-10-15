@@ -21,19 +21,15 @@ from .fakes import FakeBackend, RecordingStream, fake_mock_server
 pytestmark = pytest.mark.anyio
 
 TOOLS = {
-    "scan_bus",
-    "read_inputs",
-    "write_outputs",
-    "read_diagnosis",
     "load_gsd_file",
-    "list_slaves",
-    "read_slave_by_alias",
-    "write_slave_by_alias",
-    "ping",
+    "read_diagnosis",
     "get_master_status",
-    "test_slave_communication",
+    "write_outputs",
+    "list_slaves",
+    "read_inputs",
+    "scan_bus",
 }
-WRITE_TOOLS = {"write_outputs", "write_slave_by_alias"}
+WRITE_TOOLS = {"write_outputs"}
 
 
 def fake_replies() -> dict[str, Any]:
@@ -56,7 +52,7 @@ async def connect(config: ProfibusConfig | None = None, backend: FakeBackend | N
 
 async def call(session, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     result = await session.call_tool(name, arguments or {})
-    assert not result.isError, result
+    assert result.isError is (json.loads(result.content[0].text).get("success") is False), result
     envelope = json.loads(result.content[0].text)
     assert set(envelope) == {"success", "data", "error", "meta"}
     assert result.structuredContent == envelope
@@ -84,7 +80,7 @@ def test_server_reports_its_own_version():
     server = ProfibusMCPServer(ProfibusConfig())
     options = server.mcp._mcp_server.create_initialization_options()
     assert options.server_name == "PROFIBUS MCP Server"
-    assert options.server_version == version("profibus-mcp")
+    assert options.server_version == version("industriagents-profibus-mcp")
     assert options.server_version != version("mcp")
 
 
@@ -299,7 +295,7 @@ async def test_ping_reports_backend_and_version():
     async with connect(ProfibusConfig(backend="mock")) as session:
         ping = await call(session, "ping")
     assert ping["success"] is True
-    assert ping["data"]["version"] == version("profibus-mcp")
+    assert ping["data"]["version"] == version("industriagents-profibus-mcp")
     assert ping["data"]["slave_map_error"] is None
     assert ping["data"]["backend"] == "mock" and ping["meta"]["backend"] == "mock"
     assert ping["data"]["writes_enabled"] is False

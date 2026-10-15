@@ -1,15 +1,18 @@
 [project]
-name = "profibus-mcp"
-version = "0.1.0"
+name = "industriagents-profibus-mcp"
+version = "0.3.0"
 description = "Model Context Protocol server for PROFIBUS DP: tool surface, GSD parser and a mock backend; no real DP master yet."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "IndustriAgents" }]
 dependencies = [
+    "jsonschema>=4.23,<5",
     "anyio>=4.5.0",
-    "mcp[cli]>=1.17.0,<2",
-    "pydantic>=2.11.0",
+    # Contract wire errors require CallToolResult passthrough (tested on 1.22+).
+    "mcp[cli]>=1.22.0,<2",
+    # The supported MCP 1.x floor uses typing helpers removed in Pydantic 2.13.
+    "pydantic>=2.11.0,<2.13",
     "python-dotenv>=1.1.0",
     "pyserial>=3.5",
 ]
@@ -37,3 +40,6 @@ select = ["E", "F", "W", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/profibus_mcp"]

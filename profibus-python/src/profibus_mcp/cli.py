@@ -23,7 +23,7 @@ log = logging.getLogger("profibus_mcp")
 #: Variables outside the PROFIBUS_ prefix that the implicit .env may set.
 EXTRA_SETTINGS = frozenset({"SLAVE_MAP_FILE"})
 
-PACKAGE_NAME = "profibus-mcp"
+PACKAGE_NAME = "industriagents-profibus-mcp"
 
 
 def normalise_key(name: str) -> str:

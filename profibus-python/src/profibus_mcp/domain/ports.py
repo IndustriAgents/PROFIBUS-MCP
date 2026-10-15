@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+
+class ProfibusMasterPort(Protocol):
+    config: Any
+
+    async def scan_bus(self) -> Any: ...
+
+    async def read_inputs(self, address: Any, length: Any = ...) -> Any: ...
+
+    async def write_outputs(self, address: Any, data: Any) -> Any: ...
+
+    async def read_diagnosis(self, address: Any) -> Any: ...
+
+    def shutdown(self) -> Any: ...
+
+    def status(self) -> Any: ...

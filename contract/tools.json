@@ -1,0 +1,812 @@
+{
+  "schemaVersion": 1,
+  "protocol": "profibus",
+  "transport": "stdio",
+  "tools": [
+    {
+      "name": "read_inputs",
+      "description": "Select one target mode and provide only its parameters.\n\naddress: Read a slave's cyclic input bytes, returned as hex in raw_data_hex.\n\n        Read-only. Fails if the slave does not answer or has fewer input bytes than requested.\n        \n\nalias: read_inputs for the slave behind an alias from SLAVE_MAP_FILE. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "slave_address": {
+            "description": "DP station address of the slave (0-125)",
+            "maximum": 125,
+            "minimum": 0,
+            "title": "Slave Address",
+            "type": "integer"
+          },
+          "length": {
+            "anyOf": [
+              {
+                "maximum": 244,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Number of input bytes to read (1-244). Omit to read all of the slave's input bytes.",
+            "title": "Length"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "const": "address",
+                "type": "string"
+              },
+              {
+                "const": "alias",
+                "type": "string"
+              }
+            ],
+            "description": "Select the target mode described above."
+          },
+          "alias": {
+            "description": "Alias defined in SLAVE_MAP_FILE",
+            "minLength": 1,
+            "title": "Alias",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "slave_address": {
+                "description": "DP station address of the slave (0-125)",
+                "maximum": 125,
+                "minimum": 0,
+                "title": "Slave Address",
+                "type": "integer"
+              },
+              "length": {
+                "anyOf": [
+                  {
+                    "maximum": 244,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Number of input bytes to read (1-244). Omit to read all of the slave's input bytes.",
+                "title": "Length"
+              },
+              "target": {
+                "const": "address",
+                "type": "string"
+              }
+            },
+            "required": [
+              "slave_address",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "alias": {
+                "description": "Alias defined in SLAVE_MAP_FILE",
+                "minLength": 1,
+                "title": "Alias",
+                "type": "string"
+              },
+              "length": {
+                "anyOf": [
+                  {
+                    "maximum": 244,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Number of input bytes to read (1-244). Omit to read all of the slave's input bytes.",
+                "title": "Length"
+              },
+              "target": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_outputs",
+      "description": "Select one target mode and provide only its parameters.\n\naddress: Write output bytes to a slave. This changes physical outputs on the equipment.\n\n        Refused unless PROFIBUS_WRITES_ENABLED=true (default false); nothing is sent when refused.\n        \n\nalias: write_outputs for the slave behind an alias. This changes physical outputs on the equipment.\n\n        Refused unless PROFIBUS_WRITES_ENABLED=true (default false); nothing is sent when refused.\n        ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "slave_address": {
+            "description": "DP station address of the slave (0-125)",
+            "maximum": 125,
+            "minimum": 0,
+            "title": "Slave Address",
+            "type": "integer"
+          },
+          "data": {
+            "description": "Output bytes to write, each 0-255, starting at the first output byte.",
+            "items": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 244,
+            "minItems": 1,
+            "title": "Data",
+            "type": "array"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "const": "address",
+                "type": "string"
+              },
+              {
+                "const": "alias",
+                "type": "string"
+              }
+            ],
+            "description": "Select the target mode described above."
+          },
+          "alias": {
+            "description": "Alias defined in SLAVE_MAP_FILE",
+            "minLength": 1,
+            "title": "Alias",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "slave_address": {
+                "description": "DP station address of the slave (0-125)",
+                "maximum": 125,
+                "minimum": 0,
+                "title": "Slave Address",
+                "type": "integer"
+              },
+              "data": {
+                "description": "Output bytes to write, each 0-255, starting at the first output byte.",
+                "items": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 244,
+                "minItems": 1,
+                "title": "Data",
+                "type": "array"
+              },
+              "target": {
+                "const": "address",
+                "type": "string"
+              }
+            },
+            "required": [
+              "slave_address",
+              "data",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "alias": {
+                "description": "Alias defined in SLAVE_MAP_FILE",
+                "minLength": 1,
+                "title": "Alias",
+                "type": "string"
+              },
+              "data": {
+                "description": "Output bytes to write, each 0-255, starting at the first output byte.",
+                "items": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 244,
+                "minItems": 1,
+                "title": "Data",
+                "type": "array"
+              },
+              "target": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "data",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "scan_bus",
+      "description": "List the DP slaves the backend reports: address, ident number, status and I/O lengths.\n\n        Read-only. With PROFIBUS_BACKEND=serial it returns success=false (not implemented).\n        ",
+      "inputSchema": {
+        "properties": {},
+        "title": "scan_busArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "read_diagnosis",
+      "description": "Read a slave's diagnosis (status and ident number) as the backend reports it. Read-only.",
+      "inputSchema": {
+        "properties": {
+          "slave_address": {
+            "description": "DP station address of the slave (0-125)",
+            "maximum": 125,
+            "minimum": 0,
+            "title": "Slave Address",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slave_address"
+        ],
+        "title": "read_diagnosisArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "list_slaves",
+      "description": "List the aliases defined in SLAVE_MAP_FILE (alias, address, description). Does not touch the bus.",
+      "inputSchema": {
+        "properties": {},
+        "title": "list_slavesArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "load_gsd_file",
+      "description": "Parse a PROFIBUS DP GSD file (ASCII keyword format): vendor, model, ident number, baud rates, modules.\n\n        Each module's I/O lengths are decoded from its configuration bytes. A bare file\n        name is also looked up in PROFIBUS_GSD_PATH. Does not touch the bus.\n        ",
+      "inputSchema": {
+        "properties": {
+          "filepath": {
+            "description": "Path or file name",
+            "minLength": 1,
+            "title": "Filepath",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filepath"
+        ],
+        "title": "load_gsd_fileArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_master_status",
+      "description": "Report the master configuration: backend, port or mock endpoint, baud rate, address, timeouts, write gate.\n\n        Does not contact the bus.\n        ",
+      "inputSchema": {
+        "properties": {},
+        "title": "get_master_statusArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ],
+  "routes": {
+    "read_inputs": {
+      "selector": "target",
+      "options": {
+        "address": "read_inputs",
+        "alias": "read_slave_by_alias"
+      },
+      "legacyHandler": "read_inputs"
+    },
+    "write_outputs": {
+      "selector": "target",
+      "options": {
+        "address": "write_outputs",
+        "alias": "write_slave_by_alias"
+      },
+      "legacyHandler": "write_outputs"
+    },
+    "scan_bus": {
+      "handler": "scan_bus"
+    },
+    "read_diagnosis": {
+      "handler": "read_diagnosis"
+    },
+    "list_slaves": {
+      "handler": "list_slaves"
+    },
+    "load_gsd_file": {
+      "handler": "load_gsd_file"
+    },
+    "get_master_status": {
+      "handler": "get_master_status"
+    }
+  },
+  "legacy": {
+    "read_inputs": "read_inputs",
+    "read_slave_by_alias": "read_inputs",
+    "write_outputs": "write_outputs",
+    "write_slave_by_alias": "write_outputs",
+    "scan_bus": "scan_bus",
+    "read_diagnosis": "read_diagnosis",
+    "test_slave_communication": "read_diagnosis",
+    "list_slaves": "list_slaves",
+    "load_gsd_file": "load_gsd_file",
+    "ping": "get_master_status",
+    "get_master_status": "get_master_status"
+  },
+  "legacySchemas": {
+    "scan_bus": {
+      "properties": {},
+      "title": "scan_busArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_inputs": {
+      "properties": {
+        "slave_address": {
+          "description": "DP station address of the slave (0-125)",
+          "maximum": 125,
+          "minimum": 0,
+          "title": "Slave Address",
+          "type": "integer"
+        },
+        "length": {
+          "anyOf": [
+            {
+              "maximum": 244,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of input bytes to read (1-244). Omit to read all of the slave's input bytes.",
+          "title": "Length"
+        }
+      },
+      "required": [
+        "slave_address"
+      ],
+      "title": "read_inputsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_outputs": {
+      "properties": {
+        "slave_address": {
+          "description": "DP station address of the slave (0-125)",
+          "maximum": 125,
+          "minimum": 0,
+          "title": "Slave Address",
+          "type": "integer"
+        },
+        "data": {
+          "description": "Output bytes to write, each 0-255, starting at the first output byte.",
+          "items": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 244,
+          "minItems": 1,
+          "title": "Data",
+          "type": "array"
+        }
+      },
+      "required": [
+        "slave_address",
+        "data"
+      ],
+      "title": "write_outputsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_diagnosis": {
+      "properties": {
+        "slave_address": {
+          "description": "DP station address of the slave (0-125)",
+          "maximum": 125,
+          "minimum": 0,
+          "title": "Slave Address",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slave_address"
+      ],
+      "title": "read_diagnosisArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "test_slave_communication": {
+      "properties": {
+        "slave_address": {
+          "description": "DP station address of the slave (0-125)",
+          "maximum": 125,
+          "minimum": 0,
+          "title": "Slave Address",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slave_address"
+      ],
+      "title": "test_slave_communicationArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "list_slaves": {
+      "properties": {},
+      "title": "list_slavesArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_slave_by_alias": {
+      "properties": {
+        "alias": {
+          "description": "Alias defined in SLAVE_MAP_FILE",
+          "minLength": 1,
+          "title": "Alias",
+          "type": "string"
+        },
+        "length": {
+          "anyOf": [
+            {
+              "maximum": 244,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of input bytes to read (1-244). Omit to read all of the slave's input bytes.",
+          "title": "Length"
+        }
+      },
+      "required": [
+        "alias"
+      ],
+      "title": "read_slave_by_aliasArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_slave_by_alias": {
+      "properties": {
+        "alias": {
+          "description": "Alias defined in SLAVE_MAP_FILE",
+          "minLength": 1,
+          "title": "Alias",
+          "type": "string"
+        },
+        "data": {
+          "description": "Output bytes to write, each 0-255, starting at the first output byte.",
+          "items": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 244,
+          "minItems": 1,
+          "title": "Data",
+          "type": "array"
+        }
+      },
+      "required": [
+        "alias",
+        "data"
+      ],
+      "title": "write_slave_by_aliasArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "load_gsd_file": {
+      "properties": {
+        "filepath": {
+          "description": "Path or file name",
+          "minLength": 1,
+          "title": "Filepath",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filepath"
+      ],
+      "title": "load_gsd_fileArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "ping": {
+      "properties": {},
+      "title": "pingArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "get_master_status": {
+      "properties": {},
+      "title": "get_master_statusArguments",
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "required": [
+      "success",
+      "data",
+      "error",
+      "meta"
+    ],
+    "properties": {
+      "success": {
+        "type": "boolean"
+      },
+      "data": {},
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "meta": {
+        "type": "object"
+      }
+    },
+    "additionalProperties": false
+  },
+  "localStatusTools": [
+    "get_master_status"
+  ]
+}

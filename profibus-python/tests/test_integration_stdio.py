@@ -36,17 +36,13 @@ from .conftest import MOCK_DIR, MOCK_GSD_DIR, TESTS_DIR
 from .fakes import free_port
 
 TOOLS = {
-    "scan_bus",
-    "read_inputs",
-    "write_outputs",
-    "read_diagnosis",
     "load_gsd_file",
-    "list_slaves",
-    "read_slave_by_alias",
-    "write_slave_by_alias",
-    "ping",
+    "read_diagnosis",
     "get_master_status",
-    "test_slave_communication",
+    "write_outputs",
+    "list_slaves",
+    "read_inputs",
+    "scan_bus",
 }
 SERVER_MODULE = [sys.executable, "-m", "profibus_mcp.cli"]
 
@@ -166,7 +162,7 @@ async def mcp_session(
 async def call(session: ClientSession, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     with anyio.fail_after(30):
         result = await session.call_tool(name, arguments or {})
-    assert not result.isError, result
+    assert result.isError is (json.loads(result.content[0].text).get("success") is False), result
     envelope = json.loads(result.content[0].text)
     assert set(envelope) == {"success", "data", "error", "meta"}, envelope
     return envelope
@@ -193,7 +189,7 @@ async def test_every_tool_end_to_end_with_writes_disabled(mock_port: int, tmp_pa
 
     async with mcp_session(env, tmp_path) as (session, init):
         assert init.serverInfo.name == "PROFIBUS MCP Server"
-        assert init.serverInfo.version == version("profibus-mcp")
+        assert init.serverInfo.version == version("industriagents-profibus-mcp")
         tools = (await session.list_tools()).tools
         assert {tool.name for tool in tools} == TOOLS
         assert all(tool.description for tool in tools)
@@ -473,7 +469,7 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map:
                 },
             }
         )
-        assert response(1)["result"]["serverInfo"]["version"] == version("profibus-mcp")
+        assert response(1)["result"]["serverInfo"]["version"] == version("industriagents-profibus-mcp")
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         assert {tool["name"] for tool in response(2)["result"]["tools"]} == TOOLS
@@ -487,10 +483,22 @@ def test_stdout_carries_only_json_rpc(mock_port: int, tmp_path: Path, slave_map:
                 }
             )
             result = response(request_id)["result"]
-            assert not result.get("isError"), (name, result)
+            assert result.get("isError") is (result["structuredContent"]["success"] is False), (name, result)
             envelope = json.loads(result["content"][0]["text"])
             assert set(envelope) == {"success", "data", "error", "meta"}, (name, envelope)
-        assert {name for name, _ in calls} == TOOLS
+        assert {name for name, _ in calls} == {
+            "write_slave_by_alias",
+            "test_slave_communication",
+            "scan_bus",
+            "list_slaves",
+            "read_slave_by_alias",
+            "read_diagnosis",
+            "read_inputs",
+            "load_gsd_file",
+            "ping",
+            "get_master_status",
+            "write_outputs",
+        }
     finally:
         process.stdin.close()
         try:

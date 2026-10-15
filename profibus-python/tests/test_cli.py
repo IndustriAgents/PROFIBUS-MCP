@@ -78,7 +78,9 @@ def test_installed_package_has_no_implicit_env_file(tmp_path):
     installed = tmp_path / "lib" / "python3.11" / "site-packages" / "profibus_mcp"
     installed.mkdir(parents=True)
     (installed / "cli.py").write_text("", encoding="utf-8")
-    (tmp_path / "lib" / "python3.11" / "pyproject.toml").write_text('name = "profibus-mcp"\n', encoding="utf-8")
+    (tmp_path / "lib" / "python3.11" / "pyproject.toml").write_text(
+        'name = "industriagents-profibus-mcp"\n', encoding="utf-8"
+    )
     assert cli.find_project_dir(installed / "cli.py") is None
 
 
@@ -270,7 +272,7 @@ def test_version_flag(capsys):
     with pytest.raises(SystemExit) as info:
         cli.main(["--version"])
     assert info.value.code == 0
-    assert capsys.readouterr().out.strip() == f"profibus-mcp {version('profibus-mcp')}"
+    assert capsys.readouterr().out.strip() == f"profibus-mcp {version('industriagents-profibus-mcp')}"
 
 
 def test_env_example_documents_every_setting():
