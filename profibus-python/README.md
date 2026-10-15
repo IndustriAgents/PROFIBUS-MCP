@@ -7,7 +7,7 @@
 
 # profibus-python
 
-Python MCP server for PROFIBUS DP. Built with `uv`, `mcp[cli]` (1.17 or later,
+Python MCP server for PROFIBUS DP. Built with `uv`, `mcp[cli]` (1.22 or later,
 below 2) and `anyio`, it
 exposes the `profibus-mcp` CLI with tools for AI agents and MCP-compatible
 clients to scan the bus, exchange cyclic data, read diagnostics and parse GSD
@@ -145,8 +145,13 @@ profibus-python/
 │   ├── cli.py          # entry point: .env, config, logging to stderr
 │   ├── config.py       # all settings, read at startup
 │   ├── server.py       # FastMCP wiring, argument errors as envelopes
-│   ├── tools.py        # the 11 tools and the slave-alias map
-│   ├── pb_master.py    # master facade, mock and serial backends
+│   ├── tools.py        # compatibility exports
+│   ├── protocol/       # 7 advertised tools and legacy dispatch
+│   ├── application/    # protocol operations
+│   ├── domain/         # ports, errors and policy
+│   ├── infrastructure/ # alias maps and audit
+│   ├── adapters/       # native master and backend implementations
+│   ├── pb_master.py    # compatibility import for the master adapter
 │   └── gsd_parser.py   # GSD keyword-file parser
 └── tests/              # pytest: unit tests and stdio tests against the mock
 ```

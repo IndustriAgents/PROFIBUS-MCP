@@ -33,8 +33,8 @@ Rebuilding can change archive hashes; these identify the verified files.
 
 | Artifact | SHA-256 |
 |---|---|
-| `industriagents_profibus_mcp-0.3.0-py3-none-any.whl` | `e774334aa8f666397e1c2202ec486878ff725109990994f89cb86a1ff1fc2430` |
-| `industriagents_profibus_mcp-0.3.0.tar.gz` | `b569ab6cefbaa9ab92fda7898418bd5412303fd6ce7566c8ed3be33acf75df78` |
-| `industriagents-profibus-mcp-0.3.0.tgz` | `9438d26e1081ddcc645e90a38f3039539e1dd8ee7fc4167c82b72f470e871be4` |
+| `industriagents_profibus_mcp-0.3.0-py3-none-any.whl` | `b5465705c9914a877c90888d314cf82d1c3c82c93b3be62ca740aee1088336bc` |
+| `industriagents_profibus_mcp-0.3.0.tar.gz` | `6b5a028043fe4494e58b7292a2510923aeebf6f3e87fdaa3794dc9ac92951a80` |
+| `industriagents-profibus-mcp-0.3.0.tgz` | `8dcffe0a67c0482af564464e6fdbc486653c277b7aaf6f53e4bce59b21ee8aa7` |
 
 See [release instructions](release.md) for independent registry publication.
