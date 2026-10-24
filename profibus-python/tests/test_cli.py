@@ -282,3 +282,29 @@ def test_env_example_documents_every_setting():
         assert name in text
     # The gate appears only commented out, with the reason.
     assert "\nPROFIBUS_WRITES_ENABLED" not in text and "--env-file" in text
+
+
+@pytest.mark.parametrize("policy_content", ['{"read_only": "no"}', None])
+def test_invalid_policy_file_is_a_clean_configuration_error(tmp_path, policy_content):
+    import os
+    import subprocess
+    import sys
+
+    policy = tmp_path / "policy.json"
+    if policy_content is not None:
+        policy.write_text(policy_content)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PROFIBUS_")}
+    env.update({"PROFIBUS_BACKEND": "mock", "PROFIBUS_POLICY_FILE": str(policy)})
+    result = subprocess.run(
+        [sys.executable, "-m", "profibus_mcp.cli"],
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "configuration error" in result.stderr
+    assert "Traceback" not in result.stderr

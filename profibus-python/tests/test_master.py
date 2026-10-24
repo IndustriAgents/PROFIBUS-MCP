@@ -209,6 +209,31 @@ async def test_unexpected_error_reports_whether_anything_was_sent(monkeypatch, s
     assert isinstance(info.value, OutcomeUnknownError) is sent
 
 
+@pytest.mark.parametrize("meta", [{}, {"request_sent": None}])
+async def test_backend_error_without_send_evidence_remains_unknown(meta):
+    from .fakes import FakeBackend
+
+    backend = FakeBackend({"write_outputs": ProfibusMasterError("backend failed after possible send", meta)})
+    master = ProfibusMaster(ProfibusConfig(writes_enabled=True), backend)
+    with pytest.raises(OutcomeUnknownError) as caught:
+        await master.write_outputs(5, [1])
+    assert caught.value.meta["outcome"] == "unknown"
+    assert caught.value.meta["request_sent"] is None
+    assert len(backend.calls) == 1
+
+
+async def test_explicit_backend_refusal_reports_the_request_was_sent():
+    from .fakes import FakeBackend
+
+    backend = FakeBackend({"write_outputs": RequestRejectedError("device refused")})
+    master = ProfibusMaster(ProfibusConfig(writes_enabled=True), backend)
+    with pytest.raises(RequestRejectedError) as caught:
+        await master.write_outputs(5, [1])
+    assert caught.value.meta["outcome"] == "rejected"
+    assert caught.value.meta["request_sent"] is True
+    assert len(backend.calls) == 1
+
+
 async def test_client_disconnect_stops_a_write_waiting_to_retry():
     # Nothing listens yet, so the write waits in backoff when the client goes away.
     port = free_port()

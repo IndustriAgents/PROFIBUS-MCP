@@ -8,7 +8,6 @@ from typing import Any
 
 import anyio
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.stdio import stdio_server
 from pydantic import ValidationError
 
@@ -82,28 +81,26 @@ class EnvelopeFastMCP(FastMCP):
                 self.on_client_disconnect()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        try:
-            return await super().call_tool(name, arguments)
-        except ToolError as exc:
-            tool = self._tool_manager.get_tool(name)
-            if tool is None:
-                raise
-            meta: dict[str, Any] = {"tool": name, "backend": self.backend_name}
-            if name in WRITE_TOOLS:
-                meta.update(NOT_SENT)
-            envelope = err(_describe(exc), meta)
-            return tool.fn_metadata.convert_result(envelope)
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            try:
+                # Native argument validation must precede the handler. Runtime
+                # ValidationError does not imply that nothing was sent.
+                tool.fn_metadata.arg_model.model_validate(tool.fn_metadata.pre_parse_json(arguments))
+            except ValidationError as exc:
+                meta: dict[str, Any] = {"tool": name, "backend": self.backend_name}
+                if name in WRITE_TOOLS:
+                    meta.update(NOT_SENT)
+                return tool.fn_metadata.convert_result(err(_describe(exc), meta))
+        return await super().call_tool(name, arguments)
 
 
-def _describe(exc: ToolError) -> str:
-    cause = exc.__cause__
-    if isinstance(cause, ValidationError):
-        problems = []
-        for item in cause.errors():
-            where = ".".join(str(part) for part in item["loc"]) or "arguments"
-            problems.append(f"{where}: {item['msg']}")
-        return "Invalid arguments: " + "; ".join(problems)
-    return str(exc)
+def _describe(exc: ValidationError) -> str:
+    problems = []
+    for item in exc.errors():
+        where = ".".join(str(part) for part in item["loc"]) or "arguments"
+        problems.append(f"{where}: {item['msg']}")
+    return "Invalid arguments: " + "; ".join(problems)
 
 
 def _instructions(config: ProfibusConfig) -> str:

@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> None:
             env_file, ignored = load_env_file(find_project_dir())
         config = ProfibusConfig.from_env()
         server = ProfibusMCPServer(config)
-    except ConfigError as exc:
+    except (ValueError, OSError) as exc:
         print(f"profibus-mcp: configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
 

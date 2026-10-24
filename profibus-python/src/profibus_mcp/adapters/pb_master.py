@@ -456,14 +456,15 @@ class ProfibusMaster:
                 "write_outputs", "write_outputs", {"address": address, "data": list(payload)}, retry_after_send=False
             )
         except RequestRejectedError as exc:
-            exc.meta.update(outcome="rejected", slave_address=address)
+            exc.meta.update(outcome="rejected", request_sent=True, slave_address=address)
             raise
         except ProfibusMasterError as exc:
             exc.meta["slave_address"] = address
-            if not exc.meta.get("request_sent"):
+            if exc.meta.get("request_sent") is False:
                 exc.meta["outcome"] = "not_sent"
                 raise
-            raise _outcome_unknown(str(exc), exc.meta) from exc
+            sent = True if exc.meta.get("request_sent") is True else None
+            raise _outcome_unknown(str(exc), exc.meta, request_sent=sent) from exc
         meta["slave_address"] = address
         written = reply.get("written_bytes") if isinstance(reply, dict) else None
         if not _is_int(written):
@@ -512,14 +513,11 @@ class ProfibusMaster:
         return (data, meta)
 
 
-def _outcome_unknown(message: str, meta: Meta) -> OutcomeUnknownError:
-    meta = {**meta, "outcome": "unknown", "request_sent": True}
+def _outcome_unknown(message: str, meta: Meta, *, request_sent: bool | None = True) -> OutcomeUnknownError:
+    meta = {**meta, "outcome": "unknown", "request_sent": request_sent}
+    detail = "was sent and may have been applied" if request_sent else "may have been sent and applied"
     return OutcomeUnknownError(
-        (
-            f"{message.rstrip('.')}"
-            ". The write was sent and may have been applied; "
-            "check the slave's outputs before retrying."
-        ),
+        (f"{message.rstrip('.')}. The write {detail}; check the slave's outputs before retrying."),
         meta,
     )
 

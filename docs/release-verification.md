@@ -1,40 +1,46 @@
 # 0.3.0 local release verification
 
-Verified on 2026-10-15. Package: `industriagents-profibus-mcp`.
+Reverified on 2026-10-24 after the architecture cross-review.
+Package: `industriagents-profibus-mcp`.
 
-This records local build verification, not registry publication. Check the
-GitHub Actions runs and registry version pages for publication status. Registry
-authentication/trusted publishers must be configured before release; GitHub
-repository access alone does not authorize registry publication.
+These are local build and installed-artifact results, not a registry release.
+No tag, commit, push or publication was performed by this verification.
 
 ## Checks
 
-- Full Python regression run: 216 passed.
-- Final architecture/contract tests: 15 passed (a separate run, not additional unique tests).
+- Full server regression suite: 246 passed.
+- Separate mock suite: 26 passed.
+- The full suite includes the final native outcome/configuration regressions and
+  the shared audit and policy-file tests; no additional focused runs are added
+  to the counts above.
 - Ruff lint and formatting checks passed for source and tests.
-- `uv lock --check` and contract/package version parity passed.
+- `uv lock --check` and contract/package-version checks passed.
 - Three npm launcher tests passed.
-- Installed wheel and installed npm tarball both initialized over stdio outside
-  the checkout, reported version 0.3.0 and listed 7 canonical tools.
-  Their schemas matched the contract; invalid mode calls returned MCP errors.
-- `twine check --strict` passed for the wheel and source distribution.
-- The npm tarball contains exactly the same wheel bytes as the PyPI artifact.
+- Fresh wheel, source distribution and npm tarball built successfully.
+- Both installed distribution routes initialized over stdio outside the source
+  checkout and listed 7 canonical tools with the exact reviewed schemas.
+  Invalid mode calls returned MCP error envelopes. Smoke tests selected the
+  exact manifest-version artifact filenames.
+- `twine check --strict` passed for wheel and source distribution.
+- Artifact inspection confirmed current packaged sources/contracts, matching
+  npm launcher bytes, and identical wheel bytes inside the npm archive.
 - `git diff --check` passed.
 
-No tests were skipped in the full regression run.
+Skipped tests: None.
 
-These are software and mock/loopback checks, not physical-device certification.
-See [protocol capability limits](architecture.md#protocol-capability-limits).
+The native checks use mock devices, loopback peers or fake driver APIs.
+They do not certify physical hardware or add unsupported live operations.
+See [architecture and protocol capability limits](architecture.md).
 
 ## Artifact SHA-256
 
-Artifacts are local build outputs in `dist/` and `npm/`, excluded from Git.
-Rebuilding can change archive hashes; these identify the verified files.
+The following artifacts are in `dist/` and `npm/`, excluded from Git.
+These hashes identify the exact verified outputs; rebuilding can change them.
 
 | Artifact | SHA-256 |
 |---|---|
-| `industriagents_profibus_mcp-0.3.0-py3-none-any.whl` | `b5465705c9914a877c90888d314cf82d1c3c82c93b3be62ca740aee1088336bc` |
-| `industriagents_profibus_mcp-0.3.0.tar.gz` | `6b5a028043fe4494e58b7292a2510923aeebf6f3e87fdaa3794dc9ac92951a80` |
-| `industriagents-profibus-mcp-0.3.0.tgz` | `8dcffe0a67c0482af564464e6fdbc486653c277b7aaf6f53e4bce59b21ee8aa7` |
+| `industriagents_profibus_mcp-0.3.0-py3-none-any.whl` | `9c51d094661c7e7ee2e0e66cf319bc4c1e70fba9f980bb0b55ee359b838d92a7` |
+| `industriagents_profibus_mcp-0.3.0.tar.gz` | `c7cf877a2a73568e24a83b3cbe6861737ea6d53eaf7e8c2e243dd199ca4b329f` |
+| `industriagents-profibus-mcp-0.3.0.tgz` | `e046ee7d929c16837bc9410c94554e5266a33e06f4eb823dc782b0538046c123` |
 
 See [release instructions](release.md) for independent registry publication.
