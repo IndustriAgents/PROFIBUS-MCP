@@ -21,13 +21,13 @@ def capabilities(
         supported = (
             backend == "mock"
             or name in ("list_slaves", "load_gsd_file", "get_master_status")
-            or (backend == "pyprofibus" and name in ("read_inputs", "write_outputs"))
+            or (backend == "pyprofibus" and name in ("read_inputs", "write_outputs", "read_diagnosis"))
         )
         reason = None
         if not supported and reason is None:
             reason = "No supported native backend for this operation"
         enabled = supported
-        if backend == "pyprofibus" and name in ("read_inputs", "write_outputs"):
+        if backend == "pyprofibus" and name in ("read_inputs", "write_outputs", "read_diagnosis"):
             enabled = supported and extra_gate
         if name in ("write_outputs",):
             enabled = enabled and writes_enabled
@@ -48,7 +48,7 @@ def capabilities(
             "The serial backend has no DP master stack and never opens the port.",
             "pyprofibus requires its separately installed 1.13 runtime, POSIX, GSDs and explicit initial outputs.",
             "PROFIBUS_BUS_ENABLED authorizes cyclic startup/parameterization; writes gate controls image changes only.",
-            "pyprofibus supports full configured output-image updates and fresh cyclic inputs, not scan/raw diagnosis.",
+            "pyprofibus diagnostics require configured diag_period > 0; broad scanning is unsupported.",
             "The upstream dummy_slave PHY is simulation; serial/FPGA timing and commissioning require hardware tests.",
         ],
     }

@@ -13,9 +13,9 @@ exposes the `profibus-mcp` CLI with tools for AI agents and MCP-compatible
 clients to scan the bus, exchange cyclic data, read diagnostics and parse GSD
 files. PROFIBUS PA is a goal, not supported yet.
 
-Two backends exist. `mock` talks to [`profibus-mock-slave`](../profibus-mock-slave)
+Three backend selections exist. `mock` talks to [`profibus-mock-slave`](../profibus-mock-slave)
 over TCP and works for every tool. `pyprofibus` adds an optional isolated class-1
-DP master for configured cyclic I/O; see [setup and licensing](../docs/pyprofibus-backend.md). `serial` (the default) stands for a DP
+DP master for configured cyclic I/O and observed periodic Slave_Diag; see [setup and licensing](../docs/pyprofibus-backend.md). `serial` (the default) stands for a DP
 master on an RS-485 adapter and is **not implemented**: bus tools return
 `success: false` and the port is never opened. See
 [Status](../README.md#status) in the repository README.

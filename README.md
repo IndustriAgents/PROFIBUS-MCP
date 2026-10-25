@@ -14,8 +14,9 @@
 An MCP server for PROFIBUS DP, plus a mock slave to run it against. It lets AI
 agents and MCP-compatible clients scan the bus, exchange cyclic data, read
 diagnostics and parse GSD files. Today every tool works end to end against the
-mock slave in this repository; talking to a real PROFIBUS DP bus is not
-implemented yet (see [Status](#status)). PROFIBUS PA is a goal, not something
+mock slave in this repository; the optional pyprofibus backend implements
+configured DP I/O and observed native diagnostics, with hardware commissioning
+still required (see [Status](#status)). PROFIBUS PA is a goal, not something
 the code supports. It follows the same shape as the other
 [IndustriConnect](https://github.com/IndustriAgents/IndustriConnect) servers
 (Modbus, S7comm, EtherCAT and the rest): one `uv` project for the server, one
@@ -29,7 +30,7 @@ The server has three backends, chosen with `PROFIBUS_BACKEND`:
 | Backend | What it talks to | State |
 |---------|------------------|-------|
 | `mock` | `profibus-mock-slave` over TCP (JSON lines, `127.0.0.1:7100` by default) | Works for every tool. The data comes from the mock's simulated slaves; no PROFIBUS telegrams are involved. |
-| `pyprofibus` | Optional isolated class-1 DP master with configured GSDs and initial output images | Cyclic reads and full-image writes; explicit bus gate; dummy PHY tested, hardware commissioning required. See [setup](docs/pyprofibus-backend.md). |
+| `pyprofibus` | Optional isolated class-1 DP master with configured GSDs and initial output images | Cyclic reads, full-image writes and observed Slave_Diag; explicit bus gate; dummy PHY tested, hardware commissioning required. See [setup](docs/pyprofibus-backend.md). |
 | `serial` (default) | A DP master on an RS-485 adapter | **Not implemented.** Bus tools return `success: false` with a "not implemented" error. The port is never opened and nothing is sent. |
 
 Every bus tool reports the configured backend in `meta.backend`, on success and
@@ -61,15 +62,16 @@ module's I/O lengths from its configuration bytes. It needs no backend. With
 
 ### Known issues and limitations
 
-- No real DP master. A credible one needs a DP master stack (token handling,
-  parameterisation, Chk_Cfg, cyclic Data_Exchange) on suitable hardware, or a
-  gateway. [pyprofibus](https://bues.ch/a/profibus) was evaluated and not
-  integrated: it is GPL-2.0-or-later (this project is MIT), describes itself as
-  beta, and its API could not be verified without hardware.
+- Physical pyprofibus operation needs the supported Linux PHY, real device GSDs,
+  initial output images and validated cycle/watchdog behavior. The optional
+  GPL worker and MIT host have separate licenses; see [deployment](docs/pyprofibus-backend.md).
 - The mock's protocol is a JSON test protocol, not PROFIBUS. It simulates two
   fixed slaves (addresses 5 and 8) and always reports their status as `OK`.
-- `read_diagnosis` returns the status and ident number the backend reports; the
-  standard 6-byte DP diagnosis is not decoded yet.
+- `read_diagnosis` observes correlated standard DP diagnosis in pyprofibus when
+  `diag_period > 0`; raw extended bytes are preserved without vendor interpretation.
+  It can start the master/initial outputs, so MCP `read_only` policy denies it
+  (including `test_slave_communication`) in every backend. A clean standard
+  diagnosis does not establish physical readiness or safe output behavior.
 - The server has no tool to read back a slave's outputs, so after a write with
   outcome `unknown` the check has to happen elsewhere (for the mock, its
   `read_outputs` request).

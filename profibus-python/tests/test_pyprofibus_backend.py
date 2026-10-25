@@ -57,7 +57,8 @@ def test_config_and_static_capabilities(tmp_path):
         "reason": "Disabled by native configuration gates",
     }
     assert support["operations"]["scan_bus"]["supported"] is False
-    assert support["operations"]["read_diagnosis"]["supported"] is False
+    assert support["operations"]["read_diagnosis"]["supported"] is True
+    assert support["operations"]["read_diagnosis"]["enabled"] is False
     assert support["simulated"] is True
 
 
@@ -111,6 +112,37 @@ async def test_timeout_reaps_worker_and_latches_no_restart(tmp_path, monkeypatch
         await master.write_outputs(8, [3, 4])
     assert error.value.meta["request_sent"] is False
     assert backend._sequence == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_diagnostic_deadline_or_cancel_reaps_worker_without_replay(tmp_path, monkeypatch, cancel):
+    backend, process = pipe_backend(tmp_path, monkeypatch, "import sys,time;sys.stdin.readline();time.sleep(30)")
+    backend.config = replace(backend.config, timeout_ms=100 if cancel else 30)
+    try:
+        if cancel:
+            with anyio.move_on_after(0.03):
+                await backend.request("diagnosis", {"address": 8}, retry_after_send=True)
+        else:
+            with pytest.raises(ProfibusMasterError):
+                await backend.request("diagnosis", {"address": 8}, retry_after_send=True)
+        with anyio.fail_after(2):
+            while backend._lease.locked():
+                await anyio.sleep(0.001)
+        assert process.poll() is not None and backend.status()["fault"]
+        assert backend._sequence == 1
+    finally:
+        backend.shutdown()
+
+
+@pytest.mark.anyio
+async def test_diagnostic_success_without_actual_bytes_is_not_accepted(tmp_path, monkeypatch):
+    response = json.dumps({"id": 1, "ok": True, "data": {"address": 8, "status": "ready"}})
+    code = f"import sys,time;sys.stdin.readline();print({response!r});time.sleep(30)"
+    backend, process = pipe_backend(tmp_path, monkeypatch, code)
+    with pytest.raises(ProfibusMasterError, match="diagnostic payload"):
+        await backend.request("diagnosis", {"address": 8}, retry_after_send=True)
+    assert process.poll() is not None and backend.status()["fault"]
 
 
 @pytest.mark.anyio

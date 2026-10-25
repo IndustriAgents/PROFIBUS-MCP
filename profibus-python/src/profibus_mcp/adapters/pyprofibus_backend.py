@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import select
 import subprocess
@@ -18,6 +19,58 @@ from ..config import ProfibusConfig
 from .pb_master import BackendNotImplementedError, ProfibusMasterError, RequestRejectedError, request_cancel_requested
 
 MAX_LINE = 16384
+
+
+def validate_diagnostic(data):
+    """Check the actual DP diagnostic representation at the worker boundary."""
+    raw = data.get("raw_data_hex")
+    if not isinstance(raw, str) or not 12 <= len(raw) <= 488:
+        raise ValueError("Missing or oversized worker diagnostic payload")
+    payload = bytes.fromhex(raw)
+    if payload.hex() != raw or len(payload) < 6:
+        raise ValueError("Malformed worker diagnostic hex")
+    if data.get("diagnostic_format") != "dp_slave_diag" or not isinstance(data.get("status"), str):
+        raise ValueError("Malformed worker diagnostic format")
+    states = data.get("station_status")
+    if not isinstance(states, list) or len(states) != 3 or any(type(item) is not int for item in states):
+        raise ValueError("Malformed worker diagnostic status bytes")
+    if (
+        states != list(payload[:3])
+        or type(data.get("master_address")) is not int
+        or data["master_address"] != payload[3]
+    ):
+        raise ValueError("Inconsistent worker diagnostic bytes")
+    if data.get("ident_number") != f"0x{int.from_bytes(payload[4:6], 'big'):04X}":
+        raise ValueError("Inconsistent worker diagnostic identity")
+    expected_ident = data.get("expected_ident_number")
+    if (
+        not isinstance(expected_ident, str)
+        or len(expected_ident) != 6
+        or expected_ident != f"0x{int(expected_ident, 16):04X}"
+        or type(data.get("identity_match")) is not bool
+        or data["identity_match"] != (data["ident_number"] == expected_ident)
+    ):
+        raise ValueError("Inconsistent configured diagnostic identity")
+    expected_master = data.get("expected_master_address")
+    if (
+        type(expected_master) is not int
+        or not 0 <= expected_master <= 125
+        or type(data.get("master_match")) is not bool
+        or data["master_match"] != (payload[3] == expected_master)
+    ):
+        raise ValueError("Inconsistent configured diagnostic master")
+    if (
+        data.get("extended_diagnostics_hex") != payload[6:].hex()
+        or data.get("extended_diagnostics_decoded") is not False
+    ):
+        raise ValueError("Inconsistent worker extended diagnostics")
+    if type(data.get("diagnostics_overflow")) is not bool or data["diagnostics_overflow"] != bool(payload[2] & 0x80):
+        raise ValueError("Inconsistent worker diagnostic completeness")
+    age = data.get("received_age_ms")
+    if type(age) not in (int, float) or not math.isfinite(age) or age < 0:
+        raise ValueError("Invalid diagnostic reception age")
+    if type(data.get("sample_sequence")) is not int or data["sample_sequence"] < 1:
+        raise ValueError("Invalid diagnostic sequence")
 
 
 class PyprofibusBackend:
@@ -154,9 +207,9 @@ class PyprofibusBackend:
 
     async def request(self, op, params, *, retry_after_send):
         meta = {"backend": self.name, "request_sent": False, "simulated": self.config.pyprofibus_phy == "dummy_slave"}
-        if op not in ("read_inputs", "write_outputs"):
+        if op not in ("read_inputs", "write_outputs", "diagnosis"):
             raise BackendNotImplementedError(
-                "pyprofibus exposes configured cyclic I/O, not scanning or raw diagnosis", meta
+                "pyprofibus exposes configured cyclic I/O and diagnostics, not broad bus scanning", meta
             )
         if not self.config.bus_enabled:
             raise ProfibusMasterError("PROFIBUS_BUS_ENABLED is false; worker was not started", meta)
@@ -209,6 +262,15 @@ class PyprofibusBackend:
                     if type(data.get("written_bytes")) is not int or data["written_bytes"] != len(params["data"]):
                         raise ValueError("Incomplete process-image acknowledgement")
                     meta.update(confirmation="process_image_accepted", physical_completion_verified=False)
+                elif op == "diagnosis":
+                    validate_diagnostic(data)
+                    meta.update(
+                        source="observed_slave_diag",
+                        fresh_sample=True,
+                        correlation="station_and_service_after_native_submission",
+                        acquisition_timestamp_available=False,
+                        complete=not data.get("diagnostics_overflow", True),
+                    )
                 else:
                     meta.update(source="cyclic_process_image", fresh_sample=True)
                 return reply.get("data"), dict(meta)

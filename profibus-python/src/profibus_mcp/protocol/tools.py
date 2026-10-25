@@ -39,14 +39,14 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         """
         return await operations.write_outputs(slave_address, data)
 
-    @server.tool(annotations=_READ)
+    @server.tool(annotations=_WRITE)
     async def read_diagnosis(slave_address: SlaveAddress) -> Envelope:
-        """Read a slave's diagnosis (status and ident number) as the backend reports it. Read-only."""
+        """Read fresh slave diagnosis; pyprofibus may start the master and initial outputs."""
         return await operations.read_diagnosis(slave_address)
 
-    @server.tool(annotations=_READ)
+    @server.tool(annotations=_WRITE)
     async def test_slave_communication(slave_address: SlaveAddress) -> Envelope:
-        """Check that a slave answers, by requesting its diagnosis. Read-only.
+        """Request diagnosis; pyprofibus may start the master and initial outputs.
 
         success=true means the slave answered; success=false gives the reason.
         """
