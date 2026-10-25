@@ -75,6 +75,21 @@ async def test_every_tool_has_a_description_and_write_tools_say_so():
             assert tool.annotations.readOnlyHint is True, name
 
 
+async def test_status_reports_serial_limit_without_opening_a_bus():
+    from jsonschema import Draft202012Validator
+
+    async with connect() as session:
+        result = await call(session, "get_master_status")
+        caps = result["data"]["capabilities"]
+        assert caps["device_verified"] is False and caps["backend"] == "serial"
+        assert caps["operations"]["read_inputs"]["supported"] is False
+        assert caps["operations"]["write_outputs"]["enabled"] is False
+        assert caps["operations"]["load_gsd_file"]["supported"] is True
+        assert result["data"]["port_opened"] is False
+        tools = {t.name: t for t in (await session.list_tools()).tools}
+        Draft202012Validator(tools["get_master_status"].outputSchema).validate(result)
+
+
 def test_server_reports_its_own_version():
     # FastMCP would report the mcp SDK's version; the stdio test checks serverInfo too.
     server = ProfibusMCPServer(ProfibusConfig())

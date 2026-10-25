@@ -182,3 +182,20 @@ was sent and rejected. None of these paths retries a write.
 Invalid or missing deployment policy files are startup configuration errors:
 the CLI exits with status 2, emits a diagnostic on stderr, and leaves stdout
 free for MCP transport.
+
+## Backend capability inspection
+
+`get_master_status.data.capabilities` is a local, schema-described inventory of canonical
+operations. It reports `scope: "backend_support"` and `device_verified: false`.
+An operation's `supported` field describes the configured backend implementation;
+`enabled` describes native configuration gates only. Neither field grants MCP
+policy authorization or verifies a device's current state or reachability.
+See [protocol research and capability matrix](protocol-research.md) for sources,
+implementation evidence, migration notes and outstanding hardware/driver limits.
+
+Every canonical operation now names an explicit `resultShapes` entry in
+`contract/tools.json`; its advertised `outputSchema.data` embeds that shape.
+After a deliberate contract edit run `python scripts/sync_contract.py` to refresh
+embedded schemas and the packaged copy, then `python scripts/verify_contract.py`
+to check parity. Tests validate real MCP result envelopes and matching text /
+structured content; the installed wheel/npm smoke runs the advertised contract.

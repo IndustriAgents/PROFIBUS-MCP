@@ -409,9 +409,18 @@ class ProfibusMaster:
         if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
             raise ProfibusMasterError("The backend sent a malformed scan reply", meta)
         slaves: list[dict[str, Any]] = []
+        addresses: set[int] = set()
         for item in data:
-            if not _is_int(item.get("address")):
-                raise ProfibusMasterError("The backend sent a scan entry without a valid address", meta)
+            try:
+                address = validate_slave_address(item.get("address"))
+            except InvalidArgumentError:
+                raise ProfibusMasterError("The backend sent a scan entry without a valid address", meta) from None
+            if address in addresses:
+                raise ProfibusMasterError("The backend sent duplicate slave addresses in a scan reply", meta)
+            addresses.add(address)
+            for name in ("input_length", "output_length"):
+                if name in item and (not _is_int(item[name]) or not 0 <= item[name] <= MAX_DP_DATA_LEN):
+                    raise ProfibusMasterError(f"The backend sent an invalid {name} in a scan reply", meta)
             slaves.append(dict(item))
         meta["count"] = len(slaves)
         return (slaves, meta)
@@ -424,6 +433,7 @@ class ProfibusMaster:
             params["length"] = length
         data, meta = await self._call("read_inputs", "read_inputs", params, retry_after_send=True)
         meta["slave_address"] = address
+        _check_reply_address(data, address, meta)
         raw_hex = data.get("raw_data_hex") if isinstance(data, dict) else None
         try:
             payload = bytes.fromhex(raw_hex) if isinstance(raw_hex, str) else None
@@ -431,6 +441,8 @@ class ProfibusMaster:
             payload = None
         if payload is None:
             raise ProfibusMasterError("The backend sent a malformed read_inputs reply", meta)
+        if len(payload) > MAX_DP_DATA_LEN:
+            raise ProfibusMasterError(f"The backend returned more than {MAX_DP_DATA_LEN} input bytes", meta)
         if length is not None and len(payload) != length:
             raise ProfibusMasterError(
                 f"Slave {address} returned {len(payload)} input bytes, {length} were requested", meta
@@ -466,6 +478,10 @@ class ProfibusMaster:
             sent = True if exc.meta.get("request_sent") is True else None
             raise _outcome_unknown(str(exc), exc.meta, request_sent=sent) from exc
         meta["slave_address"] = address
+        try:
+            _check_reply_address(reply, address, meta)
+        except ProfibusMasterError as exc:
+            raise _outcome_unknown(str(exc), meta) from exc
         written = reply.get("written_bytes") if isinstance(reply, dict) else None
         if not _is_int(written):
             raise _outcome_unknown("The backend sent a malformed write_outputs reply.", meta)
@@ -480,6 +496,7 @@ class ProfibusMaster:
         meta["slave_address"] = address
         if not isinstance(data, dict) or not isinstance(data.get("status"), str):
             raise ProfibusMasterError("The backend sent a malformed diagnosis reply", meta)
+        _check_reply_address(data, address, meta)
         diag = {key: value for key, value in data.items() if key != "address"}
         return ({"slave_address": address, **diag}, meta)
 
@@ -511,6 +528,13 @@ class ProfibusMaster:
             raise
         meta = {**meta, "operation": operation, "duration_ms": _elapsed_ms(start)}
         return (data, meta)
+
+
+def _check_reply_address(data: Any, address: int, meta: Meta) -> None:
+    """An optional echoed address must identify the requested slave, never a neighbour."""
+    if isinstance(data, dict) and "address" in data:
+        if not _is_int(data["address"]) or data["address"] != address:
+            raise ProfibusMasterError("The backend replied for a different or invalid slave address", meta)
 
 
 def _outcome_unknown(message: str, meta: Meta, *, request_sent: bool | None = True) -> OutcomeUnknownError:

@@ -83,6 +83,65 @@ async def test_mock_backend_round_trip():
     ]
 
 
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"address": -1}],
+        [{"address": 126}],
+        [{"address": True}],
+        [{"address": 5}, {"address": 5}],
+        [{"address": 5, "input_length": 245}],
+        [{"address": 5, "output_length": True}],
+    ],
+)
+async def test_scan_rejects_invalid_or_ambiguous_slave_metadata(entries):
+    from .fakes import FakeBackend
+
+    backend = FakeBackend({"scan": entries})
+    master = ProfibusMaster(ProfibusConfig(), backend)
+    with pytest.raises(ProfibusMasterError):
+        await master.scan_bus()
+    assert len(backend.calls) == 1
+
+
+async def test_whole_image_read_still_obeys_dp_payload_bound():
+    from .fakes import FakeBackend
+
+    backend = FakeBackend({"read_inputs": {"raw_data_hex": "00" * 245}})
+    master = ProfibusMaster(ProfibusConfig(), backend)
+    with pytest.raises(ProfibusMasterError, match="244"):
+        await master.read_inputs(5)
+    assert len(backend.calls) == 1
+
+
+@pytest.mark.parametrize("reply_address", [6, True, "5"])
+async def test_read_and_diagnosis_do_not_attribute_another_slaves_response(reply_address):
+    from .fakes import FakeBackend
+
+    backend = FakeBackend(
+        {
+            "read_inputs": {"address": reply_address, "raw_data_hex": "00"},
+            "diagnosis": {"address": reply_address, "status": "OK"},
+        }
+    )
+    master = ProfibusMaster(ProfibusConfig(), backend)
+    for action in (master.read_inputs, master.read_diagnosis):
+        with pytest.raises(ProfibusMasterError, match="slave address"):
+            await action(5)
+    assert len(backend.calls) == 2
+
+
+async def test_ack_for_another_slave_is_an_unknown_write_without_resend():
+    async def wrong(request):
+        return {"success": True, "data": {"address": 6, "written_bytes": 1}}
+
+    async with fake_mock_server(wrong) as (port, received):
+        master = mock_master(port, writes_enabled=True)
+        with pytest.raises(OutcomeUnknownError) as caught:
+            await master.write_outputs(5, [1])
+    assert caught.value.meta["outcome"] == "unknown" and len(received) == 1
+
+
 async def test_error_reply_is_an_error_and_is_not_retried():
     async with fake_mock_server(good_slave) as (port, received):
         master = mock_master(port)
