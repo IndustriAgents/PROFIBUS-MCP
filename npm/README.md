@@ -16,3 +16,5 @@ Use `profibus-mcp --help` for configuration. All output on stdout after startup
 is MCP JSON-RPC. Environment variables and CLI options are passed unchanged.
 Writes are disabled by default. See the repository's [architecture and tool
 migration guide](https://github.com/IndustriAgents/PROFIBUS-MCP/blob/main/docs/architecture.md).
+
+The bundled wheel includes a separately marked GPL-2.0-or-later optional pyprofibus worker; the launcher and MCP host remain MIT. Upstream pyprofibus is installed separately. See [backend setup and component licensing](https://github.com/IndustriAgents/PROFIBUS-MCP/blob/main/docs/pyprofibus-backend.md).

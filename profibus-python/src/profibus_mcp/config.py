@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 #: Backends the server can talk to. ``serial`` is a real DP master interface
-#: (not implemented yet); ``mock`` is the TCP JSON-lines protocol spoken by
+#: (compatibility placeholder); ``pyprofibus`` owns a configured DP master worker.
+#: ``mock`` is the TCP JSON-lines protocol spoken by
 #: ``profibus-mock-slave``.
-BACKENDS = ("serial", "mock")
+BACKENDS = ("serial", "mock", "pyprofibus")
 
 #: Transmission rates defined for PROFIBUS DP over RS-485, in bit/s.
 DP_BAUDRATES = (9600, 19200, 45450, 93750, 187500, 500000, 1500000, 3000000, 6000000, 12000000)
@@ -45,6 +46,11 @@ class ProfibusConfig:
     max_retries: int = 3
     retry_backoff_base: float = 0.1
     writes_enabled: bool = False
+    bus_enabled: bool = False
+    pyprofibus_python: str | None = None
+    pyprofibus_config: Path | None = None
+    pyprofibus_outputs: Path | None = None
+    pyprofibus_phy: str = "serial"
     mock_host: str = "127.0.0.1"
     mock_port: int = 7100
     slave_map_path: Path | None = None
@@ -55,6 +61,10 @@ class ProfibusConfig:
     def __post_init__(self) -> None:
         if self.backend not in BACKENDS:
             raise ConfigError(f"PROFIBUS_BACKEND must be one of {', '.join(BACKENDS)}, got {self.backend!r}")
+        if self.pyprofibus_phy not in ("serial", "fpga", "dummy_slave"):
+            raise ConfigError("PROFIBUS_PYPROFIBUS_PHY must be serial, fpga or dummy_slave")
+        if self.backend == "pyprofibus" and (self.pyprofibus_config is None or self.pyprofibus_outputs is None):
+            raise ConfigError("pyprofibus requires PROFIBUS_PYPROFIBUS_CONFIG and PROFIBUS_PYPROFIBUS_OUTPUTS")
         if not self.port.strip():
             raise ConfigError("PROFIBUS_PORT must not be empty")
         if self.baudrate not in DP_BAUDRATES:
@@ -121,6 +131,13 @@ class ProfibusConfig:
         gsd_path = _get(env, "PROFIBUS_GSD_PATH")
         return cls(
             backend=backend or "serial",
+            bus_enabled=_bool(env, "PROFIBUS_BUS_ENABLED", False),
+            pyprofibus_python=_get(env, "PROFIBUS_PYPROFIBUS_PYTHON"),
+            pyprofibus_config=Path(value).expanduser() if (value := _get(env, "PROFIBUS_PYPROFIBUS_CONFIG")) else None,
+            pyprofibus_outputs=Path(value).expanduser()
+            if (value := _get(env, "PROFIBUS_PYPROFIBUS_OUTPUTS"))
+            else None,
+            pyprofibus_phy=_get(env, "PROFIBUS_PYPROFIBUS_PHY") or "serial",
             port=port,
             baudrate=_int(env, "PROFIBUS_BAUDRATE", 500000),
             master_address=_int(env, "PROFIBUS_MASTER_ADDRESS", 2),

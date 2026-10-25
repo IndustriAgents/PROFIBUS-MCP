@@ -1,13 +1,17 @@
 """PROFIBUS DP master facade and the backends behind it.
 
-Two backends exist, selected by ``PROFIBUS_BACKEND``:
+Three backends exist, selected by ``PROFIBUS_BACKEND``:
 
 ``serial``
-    A DP master on an RS-485 interface. This server has no DP master stack
+    A reserved RS-485 interface. This compatibility backend has no DP master stack
     (FDL token handling, parameterisation, Chk_Cfg, Data_Exchange), so every
     bus operation fails with :class:`BackendNotImplementedError`. The port is
     never opened: an RS-485 adapter opened without a stack in control can
     switch its line driver on and disturb a running bus.
+
+``pyprofibus``
+    An optional isolated class-1 DP master with configured slaves, cyclic I/O
+    and explicit initial images. Bus startup requires a separate enable gate.
 
 ``mock``
     The TCP JSON-lines protocol of ``profibus-mock-slave``. One request per
@@ -159,11 +163,11 @@ class SerialBackend:
                 f"{op}"
                 "' is not implemented for "
                 "PROFIBUS_BACKEND=serial: this server has no "
-                "PROFIBUS DP master stack yet, so nothing was "
+                "PROFIBUS DP stack configured for this compatibility backend, so nothing was "
                 "sent and "
                 f"{self.config.port}"
                 " was not opened. Set PROFIBUS_BACKEND=mock to "
-                "use profibus-mock-slave."
+                "use profibus-mock-slave, or configure the optional pyprofibus backend."
             ),
             meta,
         )
@@ -394,6 +398,10 @@ class MockBackend:
 def create_backend(config: ProfibusConfig) -> Backend:
     if config.backend == "mock":
         return MockBackend(config)
+    if config.backend == "pyprofibus":
+        from .pyprofibus_backend import PyprofibusBackend
+
+        return PyprofibusBackend(config)
     return SerialBackend(config)
 
 
@@ -409,9 +417,18 @@ class ProfibusMaster:
         if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
             raise ProfibusMasterError("The backend sent a malformed scan reply", meta)
         slaves: list[dict[str, Any]] = []
+        addresses: set[int] = set()
         for item in data:
-            if not _is_int(item.get("address")):
-                raise ProfibusMasterError("The backend sent a scan entry without a valid address", meta)
+            try:
+                address = validate_slave_address(item.get("address"))
+            except InvalidArgumentError:
+                raise ProfibusMasterError("The backend sent a scan entry without a valid address", meta) from None
+            if address in addresses:
+                raise ProfibusMasterError("The backend sent duplicate slave addresses in a scan reply", meta)
+            addresses.add(address)
+            for name in ("input_length", "output_length"):
+                if name in item and (not _is_int(item[name]) or not 0 <= item[name] <= MAX_DP_DATA_LEN):
+                    raise ProfibusMasterError(f"The backend sent an invalid {name} in a scan reply", meta)
             slaves.append(dict(item))
         meta["count"] = len(slaves)
         return (slaves, meta)
@@ -424,6 +441,7 @@ class ProfibusMaster:
             params["length"] = length
         data, meta = await self._call("read_inputs", "read_inputs", params, retry_after_send=True)
         meta["slave_address"] = address
+        _check_reply_address(data, address, meta)
         raw_hex = data.get("raw_data_hex") if isinstance(data, dict) else None
         try:
             payload = bytes.fromhex(raw_hex) if isinstance(raw_hex, str) else None
@@ -431,6 +449,8 @@ class ProfibusMaster:
             payload = None
         if payload is None:
             raise ProfibusMasterError("The backend sent a malformed read_inputs reply", meta)
+        if len(payload) > MAX_DP_DATA_LEN:
+            raise ProfibusMasterError(f"The backend returned more than {MAX_DP_DATA_LEN} input bytes", meta)
         if length is not None and len(payload) != length:
             raise ProfibusMasterError(
                 f"Slave {address} returned {len(payload)} input bytes, {length} were requested", meta
@@ -466,12 +486,16 @@ class ProfibusMaster:
             sent = True if exc.meta.get("request_sent") is True else None
             raise _outcome_unknown(str(exc), exc.meta, request_sent=sent) from exc
         meta["slave_address"] = address
+        try:
+            _check_reply_address(reply, address, meta)
+        except ProfibusMasterError as exc:
+            raise _outcome_unknown(str(exc), meta) from exc
         written = reply.get("written_bytes") if isinstance(reply, dict) else None
         if not _is_int(written):
             raise _outcome_unknown("The backend sent a malformed write_outputs reply.", meta)
         if written != len(payload):
             raise _outcome_unknown(f"Slave {address} reported {written} of {len(payload)} output bytes written.", meta)
-        meta["outcome"] = "written"
+        meta["outcome"] = "submitted" if meta.get("confirmation") == "process_image_accepted" else "written"
         return (written, meta)
 
     async def read_diagnosis(self, address: int) -> tuple[dict[str, Any], Meta]:
@@ -480,6 +504,7 @@ class ProfibusMaster:
         meta["slave_address"] = address
         if not isinstance(data, dict) or not isinstance(data.get("status"), str):
             raise ProfibusMasterError("The backend sent a malformed diagnosis reply", meta)
+        _check_reply_address(data, address, meta)
         diag = {key: value for key, value in data.items() if key != "address"}
         return ({"slave_address": address, **diag}, meta)
 
@@ -511,6 +536,13 @@ class ProfibusMaster:
             raise
         meta = {**meta, "operation": operation, "duration_ms": _elapsed_ms(start)}
         return (data, meta)
+
+
+def _check_reply_address(data: Any, address: int, meta: Meta) -> None:
+    """An optional echoed address must identify the requested slave, never a neighbour."""
+    if isinstance(data, dict) and "address" in data:
+        if not _is_int(data["address"]) or data["address"] != address:
+            raise ProfibusMasterError("The backend replied for a different or invalid slave address", meta)
 
 
 def _outcome_unknown(message: str, meta: Meta, *, request_sent: bool | None = True) -> OutcomeUnknownError:
