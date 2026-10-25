@@ -18,6 +18,22 @@ permissions:
 # server over stdio with the MCP client SDK (PROFIBUS_BACKEND=mock). No serial
 # port is ever opened.
 jobs:
+  pyprofibus:
+    name: Actual pyprofibus DP stack (dummy PHY only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Install isolated pinned upstream runtime
+        run: |
+          uv venv --python 3.11 "$RUNNER_TEMP/pyprofibus"
+          PYPROFIBUS_CYTHON_BUILD=0 uv pip install --python "$RUNNER_TEMP/pyprofibus" pyserial==3.5 \
+            'pyprofibus @ git+https://github.com/mbuesch/pyprofibus.git@7b6fa3cea6edb162f5cc56c8afe6eae6e0ccda32'
+      - name: Real state machine, MCP wire and worker lifecycle
+        run: |
+          PROFIBUS_TEST_PYTHON="$RUNNER_TEMP/pyprofibus/bin/python" uv run --locked --directory profibus-python \
+            pytest -v tests/test_pyprofibus_integration.py tests/test_pyprofibus_backend.py
   server:
     name: MCP server (profibus-python)
     runs-on: ubuntu-latest

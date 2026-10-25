@@ -1,0 +1,15 @@
+#Profibus_DP
+GSD_Revision=1
+Vendor_Name="IndustriAgents"
+Model_Name="SOFTWARE TEST ONLY"
+Revision="1"
+Ident_Number=0x1234
+Protocol_Ident=0
+Station_Type=0
+Modular_Station=1
+Max_Module=1
+Max_Input_Len=2
+Max_Output_Len=2
+Max_Data_Len=4
+Module="Two byte I/O" 0x31
+EndModule

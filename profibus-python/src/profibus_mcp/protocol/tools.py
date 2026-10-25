@@ -22,11 +22,12 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         """
         return await operations.scan_bus()
 
-    @server.tool(annotations=_READ)
+    @server.tool(annotations=_WRITE)
     async def read_inputs(slave_address: SlaveAddress, length: ReadLength = None) -> Envelope:
         """Read a slave's cyclic input bytes, returned as hex in raw_data_hex.
 
-        Read-only. Fails if the slave does not answer or has fewer input bytes than requested.
+        May start the enabled pyprofibus bus and transmit configured initial outputs.
+        Requires PROFIBUS_BUS_ENABLED for pyprofibus; read_only MCP policy denies this tool.
         """
         return await operations.read_inputs(slave_address, length)
 
@@ -56,9 +57,9 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         """List the aliases defined in SLAVE_MAP_FILE (alias, address, description). Does not touch the bus."""
         return await operations.list_slaves()
 
-    @server.tool(annotations=_READ)
+    @server.tool(annotations=_WRITE)
     async def read_slave_by_alias(alias: Alias, length: ReadLength = None) -> Envelope:
-        """read_inputs for the slave behind an alias from SLAVE_MAP_FILE. Read-only."""
+        """read_inputs for the slave behind an alias; may start the explicitly enabled pyprofibus bus."""
         return await operations.read_slave_by_alias(alias, length)
 
     @server.tool(annotations=_WRITE)

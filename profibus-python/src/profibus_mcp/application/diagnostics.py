@@ -42,7 +42,12 @@ class DiagnosticsOperations:
                 "version": __version__,
                 "slave_aliases": self.resources.slave_map.count(),
                 "slave_map_error": self.resources.slave_map.error,
-                "capabilities": capabilities(self.backend, writes_enabled=self.config.writes_enabled),
+                "capabilities": capabilities(
+                    self.backend,
+                    writes_enabled=self.config.writes_enabled,
+                    extra_gate=self.config.bus_enabled,
+                    phy=self.config.pyprofibus_phy,
+                ),
             },
             {"backend": self.backend},
         )

@@ -1,10 +1,11 @@
 [project]
 name = "industriagents-profibus-mcp"
 version = "0.3.0"
-description = "Model Context Protocol server for PROFIBUS DP: tool surface, GSD parser and a mock backend; no real DP master yet."
+description = "Model Context Protocol server for PROFIBUS DP: configured pyprofibus DP master, GSD parser and mock backend."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "MIT AND GPL-2.0-or-later" }
+license-files = ["LICENSE", "LICENSE.pyprofibus-worker"]
 authors = [{ name = "IndustriAgents" }]
 dependencies = [
     "jsonschema>=4.23,<5",

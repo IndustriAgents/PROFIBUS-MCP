@@ -14,7 +14,8 @@ clients to scan the bus, exchange cyclic data, read diagnostics and parse GSD
 files. PROFIBUS PA is a goal, not supported yet.
 
 Two backends exist. `mock` talks to [`profibus-mock-slave`](../profibus-mock-slave)
-over TCP and works for every tool. `serial` (the default) stands for a DP
+over TCP and works for every tool. `pyprofibus` adds an optional isolated class-1
+DP master for configured cyclic I/O; see [setup and licensing](../docs/pyprofibus-backend.md). `serial` (the default) stands for a DP
 master on an RS-485 adapter and is **not implemented**: bus tools return
 `success: false` and the port is never opened. See
 [Status](../README.md#status) in the repository README.
@@ -50,7 +51,7 @@ and exit code 2.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `PROFIBUS_BACKEND` | `serial` | `mock`: talk to `profibus-mock-slave`. `serial`: DP master on an RS-485 adapter (not implemented; bus tools return `success: false`) |
+| `PROFIBUS_BACKEND` | `serial` | `pyprofibus`: configured optional DP master; see setup. `mock`: talk to `profibus-mock-slave`. `serial`: DP master on an RS-485 adapter (not implemented; bus tools return `success: false`) |
 | `PROFIBUS_WRITES_ENABLED` | `false` | `true` lets `write_outputs` and `write_slave_by_alias` change outputs; otherwise they refuse every call. Read only from the process environment or `--env-file`, never from the implicit `.env` (see below) |
 | `PROFIBUS_MOCK_HOST` | `127.0.0.1` | Host of the mock slave (`mock` backend) |
 | `PROFIBUS_MOCK_PORT` | `7100` | TCP port of the mock slave (`mock` backend) |
@@ -123,6 +124,7 @@ Write tools also report `meta.outcome` and `meta.request_sent`:
 |-----------|---------|
 | `written` | The slave acknowledged every byte |
 | `rejected` | The slave refused the write before changing anything (the mock says so with `"applied": false`; for example too many bytes) |
+| `submitted` | pyprofibus worker accepted the complete local output image; no DP acknowledgement or physical completion is implied |
 | `not_sent` | Nothing left the server: writes disabled, invalid arguments, unknown alias, unreachable mock, or the serial backend |
 | `unknown` | The request was sent but no valid reply confirmed it (timeout, dropped connection, garbled reply, an error without a refusal, the overall deadline). It may have been applied; check the slave's outputs before retrying |
 

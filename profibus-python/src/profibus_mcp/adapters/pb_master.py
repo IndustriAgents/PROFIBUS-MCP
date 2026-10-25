@@ -1,13 +1,17 @@
 """PROFIBUS DP master facade and the backends behind it.
 
-Two backends exist, selected by ``PROFIBUS_BACKEND``:
+Three backends exist, selected by ``PROFIBUS_BACKEND``:
 
 ``serial``
-    A DP master on an RS-485 interface. This server has no DP master stack
+    A reserved RS-485 interface. This compatibility backend has no DP master stack
     (FDL token handling, parameterisation, Chk_Cfg, Data_Exchange), so every
     bus operation fails with :class:`BackendNotImplementedError`. The port is
     never opened: an RS-485 adapter opened without a stack in control can
     switch its line driver on and disturb a running bus.
+
+``pyprofibus``
+    An optional isolated class-1 DP master with configured slaves, cyclic I/O
+    and explicit initial images. Bus startup requires a separate enable gate.
 
 ``mock``
     The TCP JSON-lines protocol of ``profibus-mock-slave``. One request per
@@ -159,11 +163,11 @@ class SerialBackend:
                 f"{op}"
                 "' is not implemented for "
                 "PROFIBUS_BACKEND=serial: this server has no "
-                "PROFIBUS DP master stack yet, so nothing was "
+                "PROFIBUS DP stack configured for this compatibility backend, so nothing was "
                 "sent and "
                 f"{self.config.port}"
                 " was not opened. Set PROFIBUS_BACKEND=mock to "
-                "use profibus-mock-slave."
+                "use profibus-mock-slave, or configure the optional pyprofibus backend."
             ),
             meta,
         )
@@ -394,6 +398,10 @@ class MockBackend:
 def create_backend(config: ProfibusConfig) -> Backend:
     if config.backend == "mock":
         return MockBackend(config)
+    if config.backend == "pyprofibus":
+        from .pyprofibus_backend import PyprofibusBackend
+
+        return PyprofibusBackend(config)
     return SerialBackend(config)
 
 
@@ -487,7 +495,7 @@ class ProfibusMaster:
             raise _outcome_unknown("The backend sent a malformed write_outputs reply.", meta)
         if written != len(payload):
             raise _outcome_unknown(f"Slave {address} reported {written} of {len(payload)} output bytes written.", meta)
-        meta["outcome"] = "written"
+        meta["outcome"] = "submitted" if meta.get("confirmation") == "process_image_accepted" else "written"
         return (written, meta)
 
     async def read_diagnosis(self, address: int) -> tuple[dict[str, Any], Meta]:

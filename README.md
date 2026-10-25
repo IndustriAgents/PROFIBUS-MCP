@@ -24,11 +24,12 @@ envelope.
 
 ## Status
 
-The server has two backends, chosen with `PROFIBUS_BACKEND`:
+The server has three backends, chosen with `PROFIBUS_BACKEND`:
 
 | Backend | What it talks to | State |
 |---------|------------------|-------|
 | `mock` | `profibus-mock-slave` over TCP (JSON lines, `127.0.0.1:7100` by default) | Works for every tool. The data comes from the mock's simulated slaves; no PROFIBUS telegrams are involved. |
+| `pyprofibus` | Optional isolated class-1 DP master with configured GSDs and initial output images | Cyclic reads and full-image writes; explicit bus gate; dummy PHY tested, hardware commissioning required. See [setup](docs/pyprofibus-backend.md). |
 | `serial` (default) | A DP master on an RS-485 adapter | **Not implemented.** Bus tools return `success: false` with a "not implemented" error. The port is never opened and nothing is sent. |
 
 Every bus tool reports the configured backend in `meta.backend`, on success and
@@ -207,3 +208,6 @@ MIT — see [LICENSE](LICENSE).
 
 See [protocol research, capability matrix and verification limits](docs/protocol-research.md)
 for the supported backend scope and agent workflow.
+
+The optional pyprofibus worker is GPL-2.0-or-later; the MCP host remains MIT.
+See [component licensing and deployment](docs/pyprofibus-backend.md).

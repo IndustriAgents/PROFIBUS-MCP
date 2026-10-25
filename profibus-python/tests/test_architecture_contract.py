@@ -100,9 +100,26 @@ def test_legacy_tools_cannot_bypass_read_only_or_allowlist():
         assert result["success"] is False
         assert result["meta"]["outcome"] == "not_sent"
     assert calls == []
+
     b, calls = boundary(Policy(allowed_tools=()))
     for name, schema in b.contract["legacySchemas"].items():
         assert envelope_of(run(b.call_tool(name, sample(schema))))["success"] is False
+    assert calls == []
+
+
+def test_read_inputs_startup_side_effect_is_denied_by_read_only_policy():
+    b, calls = boundary(Policy(read_only=True))
+    assert b.tools["read_inputs"]["annotations"]["readOnlyHint"] is False
+    for name, args in [
+        ("read_inputs", {"target": "address", "slave_address": 8}),
+        ("read_inputs", {"target": "alias", "alias": "configured"}),
+        ("read_inputs", {"slave_address": 8}),
+        ("read_slave_by_alias", {"alias": "configured"}),
+    ]:
+        result = envelope_of(run(b.call_tool(name, args)))
+        assert result["success"] is False
+        assert result["meta"]["code"] == "policy_denied"
+        assert result["meta"]["request_sent"] is False
     assert calls == []
 
 

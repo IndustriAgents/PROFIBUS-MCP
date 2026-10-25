@@ -109,15 +109,22 @@ def _instructions(config: ProfibusConfig) -> str:
             f"Backend: mock. Tools talk to profibus-mock-slave at {config.mock_host}:{config.mock_port} "
             "(simulated slaves, not a real bus)."
         )
+    elif config.backend == "pyprofibus":
+        source = (
+            "Backend: pyprofibus. Configured cyclic DP I/O; bus startup requires PROFIBUS_BUS_ENABLED. "
+            "Output updates confirm process-image acceptance, not physical effect. No bus scan or raw diagnosis."
+        )
     else:
         source = (
-            "Backend: serial. Bus tools return success=false (not implemented): this server has no "
-            "PROFIBUS DP master stack yet."
+            "Backend: serial. Bus tools return success=false (not implemented): this compatibility "
+            "backend has no configured DP master. Use the optional pyprofibus backend for configured cyclic I/O."
         )
     if not config.writes_enabled:
         writes = "Writes are disabled (PROFIBUS_WRITES_ENABLED=false); write tools refuse every call."
     elif config.backend == "mock":
         writes = "Writes are enabled: write_outputs and write_slave_by_alias change the mock slave's outputs."
+    elif config.backend == "pyprofibus":
+        writes = "Writes are enabled for complete configured output images when the bus gate is enabled."
     else:
         writes = "Writes are enabled, but the serial backend is not implemented, so nothing is sent."
     return f"PROFIBUS DP tools. {source} {writes} Every tool returns {{success, data, error, meta}}."

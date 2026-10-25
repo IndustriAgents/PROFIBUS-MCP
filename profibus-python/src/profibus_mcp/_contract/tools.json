@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "read_inputs",
-      "description": "Select one target mode and provide only its parameters.\n\naddress: Read a slave's cyclic input bytes, returned as hex in raw_data_hex.\n\n        Read-only. Fails if the slave does not answer or has fewer input bytes than requested.\n        \n\nalias: read_inputs for the slave behind an alias from SLAVE_MAP_FILE. Read-only.",
+      "description": "Select one target mode and provide only its parameters.\n\naddress: Read a slave's cyclic input bytes, returned as hex in raw_data_hex.\n\n        Fails if the slave does not answer or has fewer input bytes than requested.\n        \n\nalias: read_inputs for the slave behind an alias from SLAVE_MAP_FILE.\nWith pyprofibus, the first I/O call may start and parameterize the master and transmit configured initial outputs. Requires PROFIBUS_BUS_ENABLED; read_only MCP policy denies this tool in every backend.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -129,8 +129,8 @@
         ]
       },
       "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
+        "readOnlyHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": true
       },
@@ -239,7 +239,7 @@
     },
     {
       "name": "write_outputs",
-      "description": "Select one target mode and provide only its parameters.\n\naddress: Write output bytes to a slave. This changes physical outputs on the equipment.\n\n        Refused unless PROFIBUS_WRITES_ENABLED=true (default false); nothing is sent when refused.\n        \n\nalias: write_outputs for the slave behind an alias. This changes physical outputs on the equipment.\n\n        Refused unless PROFIBUS_WRITES_ENABLED=true (default false); nothing is sent when refused.\n        ",
+      "description": "Select one target mode and provide only its parameters.\n\naddress: Write output bytes to a slave. This changes physical outputs on the equipment.\n\n        Refused unless PROFIBUS_WRITES_ENABLED=true (default false); nothing is sent when refused.\n        \n\nalias: write_outputs for the slave behind an alias. This changes physical outputs on the equipment.\n\n        Refused unless PROFIBUS_WRITES_ENABLED=true (default false); nothing is sent when refused.\n        \nWith pyprofibus, requires PROFIBUS_BUS_ENABLED and a complete configured output image. Success means local process-image acceptance (outcome=submitted), not a DP acknowledgement or verified physical effect.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1350,6 +1350,41 @@
                       }
                     },
                     "additionalProperties": false
+                  },
+                  "worker_running": {
+                    "type": "boolean"
+                  },
+                  "bus_enabled": {
+                    "type": "boolean"
+                  },
+                  "phy": {
+                    "enum": [
+                      "serial",
+                      "fpga",
+                      "dummy_slave"
+                    ]
+                  },
+                  "simulated": {
+                    "type": "boolean"
+                  },
+                  "configured_stations": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 125
+                    },
+                    "maxItems": 125,
+                    "uniqueItems": true
+                  },
+                  "fault": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "device_verified": {
+                    "const": false
                   }
                 },
                 "additionalProperties": true
@@ -2234,6 +2269,41 @@
             }
           },
           "additionalProperties": false
+        },
+        "worker_running": {
+          "type": "boolean"
+        },
+        "bus_enabled": {
+          "type": "boolean"
+        },
+        "phy": {
+          "enum": [
+            "serial",
+            "fpga",
+            "dummy_slave"
+          ]
+        },
+        "simulated": {
+          "type": "boolean"
+        },
+        "configured_stations": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 125
+          },
+          "maxItems": 125,
+          "uniqueItems": true
+        },
+        "fault": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "device_verified": {
+          "const": false
         }
       },
       "additionalProperties": true

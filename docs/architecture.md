@@ -145,7 +145,7 @@ A FIFO cannot block policy loading or audit admission while waiting for a peer.
 
 ## Protocol capability limits
 
-The mock backend exercises DP-style I/O and diagnostics. The serial/live DP backend remains explicitly unimplemented and reports that limitation; packaging does not make it hardware capable. Never use mock success as evidence of a physical bus action.
+The mock backend exercises DP-style I/O and diagnostics. The disabled `serial` compatibility backend remains available. The optional `pyprofibus` backend uses a separately installed DP master runtime in an owned subprocess for configured cyclic I/O. See [its lifecycle, gates, licensing and commissioning limits](pyprofibus-backend.md). Dummy-PHY success is not evidence of a physical bus action.
 
 ## Packages
 
