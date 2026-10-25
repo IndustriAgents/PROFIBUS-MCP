@@ -112,7 +112,8 @@ def _instructions(config: ProfibusConfig) -> str:
     elif config.backend == "pyprofibus":
         source = (
             "Backend: pyprofibus. Configured cyclic DP I/O; bus startup requires PROFIBUS_BUS_ENABLED. "
-            "Output updates confirm process-image acceptance, not physical effect. No bus scan or raw diagnosis."
+            "Output updates confirm process-image acceptance, not physical effect. "
+            "Observed periodic Slave_Diag is supported; no broad bus scan."
         )
     else:
         source = (

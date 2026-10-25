@@ -57,10 +57,11 @@ engineering inputs, not an MCP tool upload or arbitrary remote source.
 
 ## Policy compatibility change
 
-`read_inputs` now advertises `readOnlyHint=false` and `destructiveHint=true` because
+`read_inputs` and `read_diagnosis` advertise `readOnlyHint=false` and `destructiveHint=true` because
 starting the enabled pyprofibus master can parameterize slaves and transmit the
 initial output images. MCP `read_only` policy therefore denies canonical address,
-canonical alias and legacy read entry points in **every backend**, including mock.
+canonical alias and legacy read/diagnosis entry points (including
+`test_slave_communication`) in **every backend**, including mock.
 Use an explicit non-read-only policy/allowlist for this workflow after reviewing
 its startup effects. `PROFIBUS_BUS_ENABLED` remains a separate required operator
 gate; changing annotations does not bypass it. Local status remains read-only.
@@ -106,10 +107,41 @@ gate; changing annotations does not bypass it. Local status remains read-only.
   and safe-output behavior must be tested on the selected slaves; process
   termination alone does not prove the equipment reached a safe physical state.
 
-`scan_bus`, raw `read_diagnosis`, DP-V1 records/alarms and profile-specific commands
-are unsupported: the inspected public master API does not expose a complete scan
-or diagnosis result. Local aliases/GSD tools remain available. Local status shows
-configured stations only after initialization, without claiming reachability.
+## Observed native diagnostics
+
+`read_diagnosis` waits for a standard Slave_Diag reply received after admission.
+Every configured slave used for diagnosis needs `diag_period > 0`; choose a tool
+budget sufficient for that native period and bus cycle. The tool does not change
+this period or transmit an additional diagnostic request. A transparent PHY tap,
+injected through upstream's public `makeDPM(phy=...)`, forwards every send and
+poll unchanged. The native master remains the sole protocol and cycle owner.
+
+The tap correlates slave/master addresses, SAPs and service with a successful
+native diagnostic **submission**. A submission can be queued; it does not prove
+on-wire dispatch. Failed submissions, same-station replacements and queue clears
+invalidate correlation. CRC, exact telegram length, response control and reserved
+standard-status bits are checked. There is no DP diagnostic transaction ID, so
+this correlation cannot prove unique request identity. The window is bounded by
+`0.25 + 11 * 510 * (configured_slave_count + 1) / baudrate` seconds: upstream uses
+11 bits per octet and at most one queued request per station; 510 bounds one
+maximum request/reply pair, with 250 ms scheduling margin. This supports slow
+baud rates without pretending the window is a delivery guarantee. The existing
+tool deadline independently bounds waiting and stops/reaps the worker on expiry.
+
+Results include the three standard status bytes, actual/expected ident number,
+actual/expected master address, explicit match flags, raw complete diagnostic DU,
+raw extended bytes, overflow flag and monotonic sample sequence. An unassigned
+master (255) or mismatch is explicit; `no_standard_fault_flags` only describes
+these bytes, not device readiness. Extended device/module/channel diagnostic
+contents are not interpreted. Overflow reports `meta.complete=false`.
+`meta.fresh_sample` and `received_age_ms` refer to reception after admission;
+`acquisition_timestamp_available=false` prevents a sensor-time claim. The dummy
+PHY actually returns ident 0 and master 255, so its diagnosis truthfully reports
+identity mismatch against the example GSD, even though simulated cyclic I/O works.
+
+`scan_bus`, DP-V1 records/alarms and profile-specific commands remain unsupported.
+Local aliases/GSD tools remain available. Local status shows configured stations
+only after initialization, without claiming reachability.
 
 ## Verification and remaining commissioning
 

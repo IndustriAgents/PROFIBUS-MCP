@@ -115,6 +115,8 @@ def test_read_inputs_startup_side_effect_is_denied_by_read_only_policy():
         ("read_inputs", {"target": "alias", "alias": "configured"}),
         ("read_inputs", {"slave_address": 8}),
         ("read_slave_by_alias", {"alias": "configured"}),
+        ("read_diagnosis", {"slave_address": 8}),
+        ("test_slave_communication", {"slave_address": 8}),
     ]:
         result = envelope_of(run(b.call_tool(name, args)))
         assert result["success"] is False

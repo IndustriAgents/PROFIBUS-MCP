@@ -20,6 +20,138 @@ import time
 MAX_LINE = 16384
 
 
+class DiagnosticObserver:
+    """Transparent PHY tap: one underlying poll, unchanged frame, no new sends.
+
+    PROFIBUS diagnostics have no application transaction ID. Correlation here is
+    station + service following a request submitted by the sole native master.
+    Submission can queue; it is not evidence of on-wire transmission.
+    At most one latest sample and one outstanding request per configured slave
+    are retained. Neither a sensor timestamp nor strong transaction identity is
+    inferred from arrival time.
+    """
+
+    def __init__(self, phy, master_address, identities, baudrate):
+        self.phy = phy
+        self.master_address = master_address
+        self.identities = identities
+        self.requests = {}
+        self.samples = {}
+        self.sequence = 0
+        # Upstream PHY uses 11 bits/octet and at most one queued frame per DA.
+        # Allow a maximum request/reply pair per configured slave ahead of this
+        # pair plus scheduling margin. This is a bounded correlation window,
+        # not a promise of delivery or a replacement for the tool deadline.
+        self.correlation_window_s = 0.25 + 11 * 510 * (len(identities) + 1) / baudrate
+
+    def __getattr__(self, name):
+        return getattr(self.phy, name)
+
+    def send(self, telegram, *args, **kwargs):
+        from pyprofibus.dp import DpTelegram, DpTelegram_SlaveDiag_Req
+        from pyprofibus.fdl import FdlTelegram
+        from pyprofibus.util import ProfibusError
+
+        destination = getattr(telegram, "da", None)
+        self.requests.pop(destination, None)  # every per-DA send supersedes queued work
+        diagnostic = False
+        try:
+            if (
+                telegram.sa == self.master_address
+                and telegram.da in self.identities
+                and telegram.fc & FdlTelegram.FC_REQ
+                and telegram.fc & FdlTelegram.FC_REQFUNC_MASK == FdlTelegram.FC_SRD_HI
+                and bytes(telegram.dae) == bytes([DpTelegram.DSAP_SLAVE_DIAG])
+                and bytes(telegram.sae) == bytes([DpTelegram.SSAP_MS0])
+                and DpTelegram_SlaveDiag_Req.checkType(DpTelegram.fromFdlTelegram(telegram, thisIsMaster=False))
+            ):
+                diagnostic = True
+        except (ProfibusError, TypeError, AttributeError):
+            pass
+        result = self.phy.send(telegram, *args, **kwargs)
+        # A failing submission must never establish correlation. The worker is
+        # the only caller, so no receive can interleave with this native call.
+        if diagnostic:
+            self.requests[destination] = time.monotonic()
+        return result
+
+    def clearTxQueueAddr(self, da):
+        self.requests.pop(da, None)
+        return self.phy.clearTxQueueAddr(da)
+
+    def poll(self, *args, **kwargs):
+        from pyprofibus.dp import DpTelegram, DpTelegram_SlaveDiag_Con
+        from pyprofibus.fdl import FdlTelegram
+        from pyprofibus.util import ProfibusError
+
+        raw = self.phy.poll(*args, **kwargs)
+        try:
+            if raw is None or not 11 <= len(raw) <= 255:
+                return raw
+            # Upstream checks checksum and repeated length but accepts trailing
+            # SD2 bytes. This tap requires one exact telegram for a diagnostic.
+            if raw[0] == FdlTelegram.SD2 and len(raw) != raw[1] + 6:
+                return raw
+            telegram = FdlTelegram.fromRawData(raw)
+            if (
+                telegram.da != self.master_address
+                or telegram.sa not in self.requests
+                or telegram.fc not in (FdlTelegram.FC_DL, FdlTelegram.FC_DH)
+                or bytes(telegram.dae) != bytes([DpTelegram.SSAP_MS0])
+                or bytes(telegram.sae) != bytes([DpTelegram.DSAP_SLAVE_DIAG])
+            ):
+                return raw
+            if time.monotonic() - self.requests[telegram.sa] > self.correlation_window_s:
+                del self.requests[telegram.sa]
+                return raw
+            diag = DpTelegram.fromFdlTelegram(telegram, thisIsMaster=True)
+            if not DpTelegram_SlaveDiag_Con.checkType(diag) or not 6 <= len(telegram.du) <= 244:
+                return raw
+            if not diag.hasOnebit() or diag.b1 & 0x40 or diag.b2 & 0x7F:
+                return raw
+            del self.requests[telegram.sa]
+            self.sequence += 1
+            received = time.monotonic()
+            identity_match = diag.identNumber == self.identities[telegram.sa]
+            master_match = diag.masterAddr == self.master_address
+            fault = bool(diag.b0 or diag.b1 & 0x83 or diag.b2)
+            status = "no_standard_fault_flags"
+            if not identity_match:
+                status = "identity_mismatch"
+            elif diag.masterAddr == 255:
+                status = "master_unassigned"
+            elif not master_match:
+                status = "master_mismatch"
+            elif fault:
+                status = "diagnostic_fault"
+            self.samples[telegram.sa] = (
+                self.sequence,
+                received,
+                {
+                    "address": telegram.sa,
+                    "diagnostic_format": "dp_slave_diag",
+                    "status": status,
+                    "ident_number": f"0x{diag.identNumber:04X}",
+                    "expected_ident_number": f"0x{self.identities[telegram.sa]:04X}",
+                    "identity_match": identity_match,
+                    "master_address": diag.masterAddr,
+                    "expected_master_address": self.master_address,
+                    "master_match": master_match,
+                    "station_status": [diag.b0, diag.b1, diag.b2],
+                    "raw_data_hex": bytes(telegram.du).hex(),
+                    "extended_diagnostics_hex": bytes(telegram.du[6:]).hex(),
+                    "diagnostics_overflow": bool(diag.b2 & 0x80),
+                    "extended_diagnostics_decoded": False,
+                    "sample_sequence": self.sequence,
+                },
+            )
+        except (ProfibusError, TypeError, AttributeError, IndexError):
+            # Observation never suppresses/consumes a telegram: the original
+            # master decoder receives even malformed frames and owns its errors.
+            pass
+        return raw
+
+
 def emit(reply):
     sys.stdout.write(json.dumps(reply, allow_nan=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -84,7 +216,17 @@ def prepare(request):
         descriptors.append(slave.makeDpSlaveDesc())
     if set(images) != {str(address) for address in addresses}:
         raise ValueError("Initial outputs contain unconfigured stations")
-    master = config.makeDPM()
+    observer = DiagnosticObserver(
+        config.makePhy(),
+        config.dpMasterAddr,
+        {slave.slaveAddr: slave.identNumber for slave in descriptors},
+        config.phyBaud,
+    )
+    try:
+        master = config.makeDPM(phy=observer)
+    except BaseException:
+        observer.close()
+        raise
     try:
         for slave in descriptors:
             master.addSlave(slave)
@@ -130,7 +272,17 @@ def run(master, slaves, outputs):
                     length = params.get("length", slave.outputSize)
                     if type(length) is not int or not 1 <= length <= slave.outputSize:
                         raise ValueError("Read length exceeds configured master input image")
-                    pending = (ident, address, length, time.monotonic() + request["timeout_s"])
+                    pending = (ident, address, length, time.monotonic() + request["timeout_s"], "input")
+                elif op == "diagnosis":
+                    if slave.diagPeriod <= 0:
+                        raise ValueError("Live diagnosis requires configured diag_period > 0")
+                    pending = (
+                        ident,
+                        address,
+                        master.phy.sequence,
+                        time.monotonic() + request["timeout_s"],
+                        "diagnosis",
+                    )
                 elif op == "write_outputs":
                     value = params["data"]
                     if not isinstance(value, list) or len(value) != slave.inputSize:
@@ -157,8 +309,8 @@ def run(master, slaves, outputs):
             if handled.isConnected():
                 connected.add(address)
             sample = handled.getMasterInData()
-            if pending is not None and pending[1] == address and sample is not None:
-                ident, _, length, _ = pending
+            if pending is not None and pending[4] == "input" and pending[1] == address and sample is not None:
+                ident, _, length, _, _ = pending
                 emit(
                     {
                         "id": ident,
@@ -167,8 +319,14 @@ def run(master, slaves, outputs):
                     }
                 )
                 pending = None
+        if pending is not None and pending[4] == "diagnosis":
+            observed = master.phy.samples.get(pending[1])
+            if observed is not None and observed[0] > pending[2]:
+                result = {**observed[2], "received_age_ms": (time.monotonic() - observed[1]) * 1000}
+                emit({"id": pending[0], "ok": True, "data": result})
+                pending = None
         if pending is not None and time.monotonic() >= pending[3]:
-            emit({"id": pending[0], "ok": False, "error": "No fresh input sample before deadline"})
+            emit({"id": pending[0], "ok": False, "error": "No fresh input/diagnostic sample before deadline"})
             pending = None
         # Deliberately no Python promise of deterministic cycle timing. The
         # serial PHY controls wire pacing; yield so dummy/idle loops do not spin.

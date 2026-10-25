@@ -6,6 +6,7 @@ CI installs that runtime from its pinned official source in a dedicated job.
 
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -64,6 +65,51 @@ async def test_real_upstream_state_machine_round_trip(config):
         master.shutdown()
 
 
+async def test_actual_upstream_diagnostics_are_fresh_received_telegrams(config):
+    master = ProfibusMaster(config)
+    try:
+        first, meta = await master.read_diagnosis(8)
+        second, _ = await master.read_diagnosis(8)
+        assert second["sample_sequence"] > first["sample_sequence"]
+        assert first["station_status"] == [0, 4, 0]
+        # Upstream dummy returns ident 0 rather than the configured GSD identity.
+        assert first["ident_number"] == "0x0000" and first["status"] == "identity_mismatch"
+        assert first["raw_data_hex"] == "000400ff0000"
+        assert meta["source"] == "observed_slave_diag" and meta["fresh_sample"] is True
+        assert meta["correlation"] == "station_and_service_after_native_submission"
+        assert meta["acquisition_timestamp_available"] is False
+        assert (await master.read_inputs(8))[0] == b"\xff\xff"  # diagnostics did not steal native replies
+    finally:
+        master.shutdown()
+
+
+async def test_diagnostics_require_native_periodic_configuration(config):
+    config.pyprofibus_config.write_text(config.pyprofibus_config.read_text().replace("diag_period=10", "diag_period=0"))
+    master = ProfibusMaster(config)
+    try:
+        with pytest.raises(ProfibusMasterError, match="diag_period"):
+            await master.read_diagnosis(8)
+        assert (await master.read_inputs(8))[0] == b"\xff\xff"
+    finally:
+        master.shutdown()
+
+
+def test_observer_against_actual_upstream_codec():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            RUNTIME,
+            str(root / "tests/pyprofibus_observer_checks.py"),
+            str(root / "src/profibus_mcp/adapters/pyprofibus_worker.py"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert "exact forwarding passed" in result.stdout
+
+
 async def test_real_upstream_over_mcp_stdio(config, tmp_path):
     env_file = tmp_path / "empty.env"
     env_file.touch()
@@ -97,6 +143,9 @@ async def test_real_upstream_over_mcp_stdio(config, tmp_path):
         result = (await session.call_tool("write_outputs", {**target, "data": [3, 4]})).structuredContent
         assert result["meta"]["outcome"] == "submitted"
         assert result["meta"]["physical_completion_verified"] is False
+        diagnostic = (await session.call_tool("read_diagnosis", {"slave_address": 8})).structuredContent
+        assert diagnostic["success"] is True and diagnostic["data"]["station_status"] == [0, 4, 0]
+        assert diagnostic["meta"]["source"] == "observed_slave_diag"
         result = (await session.call_tool("scan_bus", {})).structuredContent
         assert result["success"] is False and result["meta"]["request_sent"] is False
 

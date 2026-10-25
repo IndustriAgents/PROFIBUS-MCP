@@ -71,7 +71,7 @@ async def test_every_tool_has_a_description_and_write_tools_say_so():
             assert tool.annotations.readOnlyHint is False and tool.annotations.destructiveHint is True
             # A write must never advertise idempotency, or clients may retry it on their own.
             assert tool.annotations.idempotentHint is False
-        elif name == "read_inputs":
+        elif name in ("read_inputs", "read_diagnosis"):
             assert tool.annotations.readOnlyHint is False
             assert "PROFIBUS_BUS_ENABLED" in tool.description
         else:

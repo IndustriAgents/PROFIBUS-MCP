@@ -26,7 +26,7 @@ protocol-conformance certification.
 | `scan_bus` | Mock slave inventory | Reject invalid/duplicate station addresses and invalid image lengths | New malformed-response tests; live scan blocked |
 | `read_inputs` | Mock or pyprofibus fresh cyclic-image read, direct or alias | Bound whole image to 244 bytes; correlate any echoed address; requested length must match | New oversized/misdirected-response tests; upstream dummy-PHY and real MCP session pass; hardware unverified |
 | `write_outputs` | Gated mock output write or pyprofibus full-image update, direct or alias | Single send; wrong-address acknowledgement is unknown, never success | New real loopback reply test plus existing cancellation/retry tests; upstream process-image update tested; physical completion never implied |
-| `read_diagnosis` | Mock status/identity | Correlate any echoed station; do not attribute another slave's status | New correlation tests; live diagnosis blocked |
+| `read_diagnosis` | Mock status/identity or observed native Slave_Diag | Native master remains sole owner; fresh reception, bounded address/SAP/service correlation; raw extension preservation | Actual upstream codec/dummy and MCP tests; hardware unverified |
 | `list_slaves` | Local configured aliases | Metadata only | Existing map tests |
 | `load_gsd_file` | Local GSD parser | Bounded file, explicit missing/invalid metadata | Existing parser tests |
 | DP master startup, parameterization, Check Configuration and continuous Data Exchange | Optional pyprofibus class-1 master worker | Exclusive cycle owner, explicit initial outputs, watchdog, bus gate, stop/latch on loss or cancellation | Actual upstream dummy-PHY state machine tested; physical commissioning remains |
@@ -70,7 +70,7 @@ MIT. The worker owns the continuous cycle, required initial images and lifecycle
 No user selection of a software stack is outstanding. See [deployment, semantics
 and limitations](pyprofibus-backend.md).
 
-Broad discovery/raw diagnosis and DP-V1/profile operations remain unsupported;
+Broad discovery and DP-V1/profile operations remain unsupported;
 they are not fabricated from connection-state booleans. Physical Linux serial or
 FPGA operation requires the selected supported adapter, genuine slave GSD/module
 configuration, verified timing/watchdog/output behavior and an isolated authorized
@@ -88,3 +88,25 @@ tests sanitize inherited protocol configuration and use only loopback mock
 settings. No serial port or physical PROFIBUS bus was opened.
 
 The separate pinned-runtime CI job additionally validates actual upstream DP state-machine I/O and real MCP stdio. This is software integration evidence using `dummy_slave`, not physical-bus verification.
+
+## Second-pass diagnostic implementation and roadmap
+
+The public [configuration factory](https://github.com/mbuesch/pyprofibus/blob/7b6fa3cea6edb162f5cc56c8afe6eae6e0ccda32/pyprofibus/conf.py)
+accepts an existing PHY. The [PHY implementation](https://github.com/mbuesch/pyprofibus/blob/7b6fa3cea6edb162f5cc56c8afe6eae6e0ccda32/pyprofibus/phy.py)
+queues one telegram per destination and paces at 11 bits/octet. The
+[DP codec](https://github.com/mbuesch/pyprofibus/blob/7b6fa3cea6edb162f5cc56c8afe6eae6e0ccda32/pyprofibus/dp.py)
+defines the six standard diagnostic bytes but discards extension bytes when
+constructing its diagnostic object. The implemented transparent observer uses
+these actual APIs, retains the original DU, and never adds a protocol sender or
+reader. Native periodic requests, queue supersession and reception freshness are
+covered by independent upstream-codec tests. See [exact diagnostic semantics and
+policy migration](pyprofibus-backend.md#observed-native-diagnostics).
+
+Prioritized remaining work:
+
+1. Commission the selected physical PHY and representative slaves; test low/high
+   baud timing, diagnostic overflow, bus loss, watchdog behavior and initial outputs.
+2. Add bounded, GSD/profile-aware decoding of extended diagnostics only against
+   documented device layouts; keep raw bytes available and unknown formats explicit.
+3. Investigate input-only slaves and DP-V1 records/alarms against upstream support
+   and concrete device profiles before expanding the current configured class-1 scope.
